@@ -1,0 +1,25 @@
+# DXF files stay local.
+*.dxf
+*.DXF
+input/used_*/
+
+# Generated workbooks.
+output/
+
+# Python environments and caches.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local configuration and logs.
+.env
+*.log
+
+# Editor and OS metadata.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*:Zone.Identifier
+~$*.xlsx
