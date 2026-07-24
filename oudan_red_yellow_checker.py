@@ -5,6 +5,7 @@ import glob
 import shutil
 import unicodedata
 from collections import Counter
+from copy import copy
 from decimal import Decimal, InvalidOperation
 from datetime import datetime
 from math import hypot
@@ -13,9 +14,10 @@ from tkinter import messagebox
 
 import ezdxf
 from openpyxl import load_workbook
+from openpyxl.formula.translate import Translator
 from openpyxl.styles import Alignment
-
-from tools import polyline_to_line_keep_others
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.worksheet.pagebreak import Break
 
 # ==================================================
 # 定数定義
@@ -41,6 +43,115 @@ EARTHWORK_HEADER_SEQUENCE = ("種別", "単位", "数量", "種別", "単位", "
 TABLE_HEADER_Y_TOLERANCE = 0.15
 TABLE_HEADER_X_GAP = 50.0
 MAX_DATA_GROUP_TO_TABLE_DISTANCE = 10.0
+LINE_AXIS_TOLERANCE = 1e-7
+LINE_CONNECTION_TOLERANCE_FACTOR = 0.05
+MAX_LINE_TO_TABLE_DISTANCE_FACTOR = 50.0
+TABLE_MIN_WIDTH_FACTOR = 40.0
+TABLE_MAX_WIDTH_FACTOR = 70.0
+TABLE_MIN_HEIGHT_FACTOR = 20.0
+TABLE_MAX_HEIGHT_FACTOR = 40.0
+ATTACHED_GRID_MAX_GAP_FACTOR = 4.0
+ATTACHED_GRID_LEFT_TOLERANCE_FACTOR = 1.0
+TABLE_REGION_TOLERANCE_FACTOR = 0.05
+
+LEGACY_OUTPUT_KINDS = (
+    "オープン掘削",
+    "路体盛土(W＜2.5m)",
+    "路体盛土(2.5m≦W＜4.0m)",
+    "路体盛土(4.0m≦W)",
+    "路床盛土(W＜2.5m)",
+    "路床盛土(2.5m≦W＜4.0m)",
+    "路床盛土(4.0m≦W)",
+    "路肩盛土",
+    "路体外盛土(W＜2.5m)",
+    "路体外盛土(2.5m≦W＜4.0m)",
+    "路体外盛土(4.0m≦W)",
+    "畦畔盛土",
+    "余盛(路体盛土)",
+    "余盛(路床盛土)",
+    "余盛(載荷盛土)",
+    "床掘",
+    "埋戻",
+    "切土法面整形(左)",
+    "切土法面整形(右)",
+    "盛土法面整形(左)",
+    "盛土法面整形(右)",
+    "表層",
+    "基層",
+    "上層路盤",
+    "下層路盤",
+    "凍上抑制層",
+    "路肩表層(左)",
+    "路肩表層(右)",
+    "路肩下層路盤(左)",
+    "路肩下層路盤(右)",
+    "サンドマット",
+    "サンドマット(端部)",
+)
+
+HIERARCHICAL_WIDTH_SUFFIX = {
+    "W＜2.5m": "(W＜2.5m)",
+    "2.5m≦W＜4.0m": "(2.5m≦W＜4.0m)",
+    "W≧4.0m": "(4.0m≦W)",
+}
+HIERARCHICAL_WIDTH_CATEGORY = {
+    "路体盛土": "路体盛土",
+    "上部路床": "路床盛土",
+    "下部路床": "路床盛土",
+    "路体外盛土": "路体外盛土",
+}
+HIERARCHICAL_SOURCE_SCHEMA = (
+    ("オープン掘削", "土砂"),
+    ("路体外盛土", "W≧4.0m"),
+    ("路体盛土", "W≧4.0m"),
+    ("路体外盛土", "2.5m≦W＜4.0m"),
+    ("路体盛土", "2.5m≦W＜4.0m"),
+    ("路体外盛土", "W＜2.5m"),
+    ("路体盛土", "W＜2.5m"),
+    ("床堀り", "床堀り"),
+    ("上部路床", "W≧4.0m"),
+    ("埋戻し", "C"),
+    ("上部路床", "2.5m≦W＜4.0m"),
+    ("埋戻し", "D"),
+    ("上部路床", "W＜2.5m"),
+    ("路床安定処理", "路床安定処理"),
+    ("下部路床", "W≧4.0m"),
+    ("下部路床", "2.5m≦W＜4.0m"),
+    ("法面整形工", "切土部(土砂)"),
+    ("下部路床", "W＜2.5m"),
+    ("法面整形工", "盛土部(土砂)"),
+    ("路肩盛土", "路肩盛土"),
+    ("法面工", "切土部(土砂)"),
+    ("畦畔盛土", "畦畔盛土"),
+    ("法面工", "盛土部(土砂)"),
+)
+HIERARCHICAL_OUTPUT_KINDS = (
+    "オープン掘削",
+    "路体盛土(W＜2.5m)",
+    "路体盛土(2.5m≦W＜4.0m)",
+    "路体盛土(4.0m≦W)",
+    "路床盛土(W＜2.5m)",
+    "路床盛土(2.5m≦W＜4.0m)",
+    "路床盛土(4.0m≦W)",
+    "路肩盛土",
+    "路体外盛土(W＜2.5m)",
+    "路体外盛土(2.5m≦W＜4.0m)",
+    "路体外盛土(4.0m≦W)",
+    "畦畔盛土",
+    "切土法面整形(左)",
+    "切土法面整形(右)",
+    "盛土法面整形(左)",
+    "盛土法面整形(右)",
+)
+HIERARCHICAL_WORK_OUTPUT_KINDS = (
+    "床掘",
+    "埋戻(C)",
+    "埋戻(D)",
+)
+HIERARCHICAL_ALL_OUTPUT_KINDS = (
+    HIERARCHICAL_OUTPUT_KINDS
+    + HIERARCHICAL_WORK_OUTPUT_KINDS
+)
 
 STATION_TEXT_LAYER = "D-BMK-HTXT"
 CENTER_MARKER_LAYER = "D-BMK"
@@ -54,6 +165,8 @@ MIN_NEAREST_DISTANCE_GAP = 1.0
 
 SHEET_NAME = "入力"
 ROW_START = 5
+VERIFIED_LEGACY_RECORD_COUNT = 25
+STATION_INTERVAL_CANDIDATES = (Decimal("20"), Decimal("100"))
 TEMPLATE_BASE = "01-01-03土工"
 TEMPLATE_NAME = TEMPLATE_BASE + ".xlsx"
 
@@ -100,6 +213,25 @@ def collect_all_texts(msp):
             "handle": t.dxf.handle,
         })
     return texts
+
+
+def collect_all_lines(msp):
+    lines = []
+    for line in msp.query("LINE"):
+        start = line.dxf.start
+        end = line.dxf.end
+        lines.append({
+            "x": (start.x + end.x) / 2,
+            "y": (start.y + end.y) / 2,
+            "start_x": start.x,
+            "start_y": start.y,
+            "end_x": end.x,
+            "end_y": end.y,
+            "layer": line.dxf.layer,
+            "handle": line.dxf.handle,
+        })
+    return lines
+
 
 def extract_no_texts(all_texts):
     results = []
@@ -359,13 +491,566 @@ def detect_earthwork_tables(all_texts):
     return tables
 
 
-def build_table_data_groups(all_texts):
-    """第1段階では、表内データの構築だけ現行ロジックを再利用する。"""
-    ba_records = build_ba_records(all_texts)
+def _line_bounds(line):
+    return {
+        "min_x": min(line["start_x"], line["end_x"]),
+        "max_x": max(line["start_x"], line["end_x"]),
+        "min_y": min(line["start_y"], line["end_y"]),
+        "max_y": max(line["start_y"], line["end_y"]),
+    }
+
+
+def _lines_bounds(lines):
+    return {
+        "min_x": min(min(line["start_x"], line["end_x"]) for line in lines),
+        "max_x": max(max(line["start_x"], line["end_x"]) for line in lines),
+        "min_y": min(min(line["start_y"], line["end_y"]) for line in lines),
+        "max_y": max(max(line["start_y"], line["end_y"]) for line in lines),
+    }
+
+
+def _point_in_bounds(x, y, bounds, tolerance=0.0):
+    return (
+        bounds["min_x"] - tolerance <= x <= bounds["max_x"] + tolerance
+        and bounds["min_y"] - tolerance <= y <= bounds["max_y"] + tolerance
+    )
+
+
+def _line_segments_touch(first, second, tolerance):
+    first_bounds = _line_bounds(first)
+    second_bounds = _line_bounds(second)
+    return not (
+        first_bounds["max_x"] < second_bounds["min_x"] - tolerance
+        or second_bounds["max_x"] < first_bounds["min_x"] - tolerance
+        or first_bounds["max_y"] < second_bounds["min_y"] - tolerance
+        or second_bounds["max_y"] < first_bounds["min_y"] - tolerance
+    )
+
+
+def _connected_line_components(lines, tolerance):
+    components = []
+    visited = set()
+
+    for start_index in range(len(lines)):
+        if start_index in visited:
+            continue
+
+        stack = [start_index]
+        visited.add(start_index)
+        component = []
+        while stack:
+            line_index = stack.pop()
+            component.append(lines[line_index])
+            for candidate_index in range(len(lines)):
+                if candidate_index in visited:
+                    continue
+                if _line_segments_touch(
+                    lines[line_index],
+                    lines[candidate_index],
+                    tolerance,
+                ):
+                    visited.add(candidate_index)
+                    stack.append(candidate_index)
+
+        components.append(component)
+
+    return components
+
+
+def detect_table_regions(tables, all_lines, all_texts):
+    """ヘッダーと同じレイヤーの罫線から、表ごとの抽出領域を作る。"""
+    if not tables:
+        raise ExtractionError("抽出領域を作成する土工表がありません。")
+
+    assignments = [[] for _ in tables]
+    table_layers = {table["layer"] for table in tables}
+
+    for line in all_lines:
+        if line["layer"] not in table_layers:
+            continue
+
+        dx = abs(line["end_x"] - line["start_x"])
+        dy = abs(line["end_y"] - line["start_y"])
+        if dx > LINE_AXIS_TOLERANCE and dy > LINE_AXIS_TOLERANCE:
+            raise ExtractionError("土工表レイヤーに斜めのLINEがあり、罫線を判定できません。")
+
+        candidate_indexes = [
+            index for index, table in enumerate(tables)
+            if table["layer"] == line["layer"]
+        ]
+        table_index = min(
+            candidate_indexes,
+            key=lambda index: _distance(tables[index], line),
+        )
+        text_height = tables[table_index]["headers"][0]["height"]
+        if (
+            _distance(tables[table_index], line)
+            > text_height * MAX_LINE_TO_TABLE_DISTANCE_FACTOR
+        ):
+            raise ExtractionError("土工表から離れた罫線が同じレイヤーに存在します。")
+        assignments[table_index].append(line)
+
+    regions = []
+    for table_index, table in enumerate(tables):
+        assigned_lines = assignments[table_index]
+        if not assigned_lines:
+            raise ExtractionError("土工表に対応する罫線を検出できませんでした。")
+
+        heights = sorted(header["height"] for header in table["headers"])
+        text_height = heights[len(heights) // 2]
+        connection_tolerance = (
+            text_height * LINE_CONNECTION_TOLERANCE_FACTOR
+        )
+        components = _connected_line_components(
+            assigned_lines,
+            connection_tolerance,
+        )
+
+        component_bounds = [
+            _lines_bounds(component)
+            for component in components
+        ]
+        main_indexes = [
+            index for index, bounds in enumerate(component_bounds)
+            if all(
+                _point_in_bounds(
+                    header["x"],
+                    header["y"],
+                    bounds,
+                    connection_tolerance,
+                )
+                for header in table["headers"]
+            )
+        ]
+        if len(main_indexes) != 1:
+            raise ExtractionError(
+                "土工表ヘッダーを含む主表罫線を一意に特定できません。"
+            )
+
+        main_index = main_indexes[0]
+        main_bounds = component_bounds[main_index]
+        main_width = main_bounds["max_x"] - main_bounds["min_x"]
+        main_height = main_bounds["max_y"] - main_bounds["min_y"]
+        if not (
+            text_height * TABLE_MIN_WIDTH_FACTOR
+            <= main_width
+            <= text_height * TABLE_MAX_WIDTH_FACTOR
+            and text_height * TABLE_MIN_HEIGHT_FACTOR
+            <= main_height
+            <= text_height * TABLE_MAX_HEIGHT_FACTOR
+        ):
+            raise ExtractionError("土工表罫線の幅または高さが想定範囲外です。")
+
+        main_horizontal_count = sum(
+            abs(line["end_y"] - line["start_y"]) <= LINE_AXIS_TOLERANCE
+            for line in components[main_index]
+        )
+        main_vertical_count = sum(
+            abs(line["end_x"] - line["start_x"]) <= LINE_AXIS_TOLERANCE
+            for line in components[main_index]
+        )
+        if main_horizontal_count < 10 or main_vertical_count < 6:
+            raise ExtractionError("土工表の水平・垂直罫線が不足しています。")
+
+        selected_indexes = {main_index}
+        attached_indexes = []
+        for component_index, bounds in enumerate(component_bounds):
+            if component_index == main_index:
+                continue
+
+            vertical_gap = main_bounds["min_y"] - bounds["max_y"]
+            left_aligned = (
+                abs(bounds["min_x"] - main_bounds["min_x"])
+                <= text_height * ATTACHED_GRID_LEFT_TOLERANCE_FACTOR
+            )
+            within_width = (
+                bounds["max_x"]
+                <= main_bounds["max_x"] + text_height
+            )
+            captions = [
+                text for text in all_texts
+                if text["layer"] == table["layer"]
+                and text["text"] == "作業土工"
+                and bounds["min_x"] - text_height
+                <= text["x"]
+                <= bounds["max_x"] + text_height
+                and abs(text["y"] - bounds["max_y"]) <= text_height * 2
+            ]
+            if (
+                0 <= vertical_gap
+                <= text_height * ATTACHED_GRID_MAX_GAP_FACTOR
+                and left_aligned
+                and within_width
+                and len(captions) == 1
+            ):
+                horizontal_count = sum(
+                    abs(line["end_y"] - line["start_y"])
+                    <= LINE_AXIS_TOLERANCE
+                    for line in components[component_index]
+                )
+                vertical_count = sum(
+                    abs(line["end_x"] - line["start_x"])
+                    <= LINE_AXIS_TOLERANCE
+                    for line in components[component_index]
+                )
+                if horizontal_count >= 2 and vertical_count >= 2:
+                    selected_indexes.add(component_index)
+                    attached_indexes.append(component_index)
+
+        if len(selected_indexes) != len(components):
+            raise ExtractionError(
+                "土工表付近に所属を判定できない罫線領域があります。"
+            )
+
+        regions.append({
+            "areas": tuple(
+                component_bounds[index]
+                for index in sorted(selected_indexes)
+            ),
+            "main_bounds": main_bounds,
+            "main_lines": tuple(components[main_index]),
+            "line_count": sum(
+                len(components[index])
+                for index in selected_indexes
+            ),
+            "attached_count": len(attached_indexes),
+            "text_height": text_height,
+        })
+
+    return regions
+
+
+def _texts_in_table_region(all_texts, table, region):
+    tolerance = (
+        region["text_height"] * TABLE_REGION_TOLERANCE_FACTOR
+    )
+    return [
+        text for text in all_texts
+        if text["layer"] == table["layer"]
+        and any(
+            _point_in_bounds(
+                text["x"],
+                text["y"],
+                bounds,
+                tolerance,
+            )
+            for bounds in region["areas"]
+        )
+    ]
+
+
+def _build_legacy_table_group(table_texts):
+    ba_records = build_ba_records(table_texts)
     final = group_by_y(group_by_x(ba_records))
     normalize_kinds(final)
     final = merge_x_groups(final)
-    return [subgroup for x_group in final for subgroup in x_group]
+    groups = [
+        subgroup for x_group in final for subgroup in x_group
+    ]
+    if len(groups) != 1:
+        raise ExtractionError(
+            f"1つの土工表から{len(groups)}個のデータ群が生成されました。"
+        )
+    group = groups[0]
+    actual_kinds = tuple(record["種別"] for record in group)
+    if actual_kinds != LEGACY_OUTPUT_KINDS:
+        missing = [
+            kind for kind in LEGACY_OUTPUT_KINDS
+            if kind not in actual_kinds
+        ]
+        extra = [
+            kind for kind in actual_kinds
+            if kind not in LEGACY_OUTPUT_KINDS
+        ]
+        raise ExtractionError(
+            f"既存型土工表の転記項目が一致しません"
+            f"（件数={len(group)}, 不足={missing}, 余分={extra}）。"
+        )
+
+    invalid_quantities = [
+        record["数量"] for record in group
+        if not (
+            isinstance(record["数量"], Decimal)
+            or record["数量"] == "-"
+        )
+    ]
+    if invalid_quantities:
+        raise ExtractionError(
+            f"既存型土工表に数値化できない数量があります"
+            f"（{invalid_quantities}）。"
+        )
+
+    return group
+
+
+def _unique_axis_values(values, tolerance):
+    result = []
+    for value in sorted(values):
+        if not result or abs(result[-1] - value) > tolerance:
+            result.append(value)
+    return result
+
+
+def _horizontal_cell_bounds(lines, x, y, tolerance):
+    levels = _unique_axis_values(
+        [
+            (line["start_y"] + line["end_y"]) / 2
+            for line in lines
+            if abs(line["end_y"] - line["start_y"])
+            <= LINE_AXIS_TOLERANCE
+            and min(line["start_x"], line["end_x"]) - tolerance
+            <= x
+            <= max(line["start_x"], line["end_x"]) + tolerance
+        ],
+        tolerance,
+    )
+    lower = [level for level in levels if level <= y + tolerance]
+    upper = [level for level in levels if level >= y - tolerance]
+    if not lower or not upper:
+        raise ExtractionError("表の結合セル境界を特定できませんでした。")
+    return max(lower), min(upper)
+
+
+def _parse_table_quantity(text):
+    if text == "-":
+        return "-"
+    try:
+        return Decimal(text)
+    except InvalidOperation:
+        return None
+
+
+def _combine_table_quantities(first, second):
+    values = [
+        value for value in (first, second)
+        if isinstance(value, Decimal)
+    ]
+    if not values:
+        return "-"
+    return sum(values, Decimal("0"))
+
+
+def _hierarchical_category(
+    record,
+    table,
+    region,
+    table_texts,
+    kind_headers,
+    division_headers,
+):
+    main_bounds = region["main_bounds"]
+    center_x = (main_bounds["min_x"] + main_bounds["max_x"]) / 2
+    side_index = 0 if record["x"] < center_x else 1
+    kind_x = kind_headers[side_index]["x"]
+    division_x = division_headers[side_index]["x"]
+    category_max_x = (kind_x + division_x) / 2
+    side_min_x = (
+        main_bounds["min_x"] if side_index == 0 else center_x
+    )
+    lower_y, upper_y = _horizontal_cell_bounds(
+        region["main_lines"],
+        kind_x,
+        record["y"],
+        region["text_height"] * LINE_CONNECTION_TOLERANCE_FACTOR,
+    )
+    candidates = [
+        text for text in table_texts
+        if side_min_x - region["text_height"] <= text["x"] < category_max_x
+        and lower_y - region["text_height"] * 0.1
+        <= text["y"]
+        <= upper_y + region["text_height"] * 0.1
+        and text["text"] != "種別"
+    ]
+    if len(candidates) != 1:
+        raise ExtractionError(
+            "階層型土工表の種別を一意に特定できませんでした。"
+        )
+    return candidates[0]["text"]
+
+
+def _row_quantity_values(record, table_texts):
+    values = []
+    for text in sorted(table_texts, key=lambda item: item["x"]):
+        if (
+            text["x"] > record["x"]
+            and abs(text["y"] - record["y"]) <= TOLERANCE_Y_ROW
+        ):
+            value = _parse_table_quantity(text["text"])
+            if value is not None:
+                values.append(value)
+    return values
+
+
+def _validate_hierarchical_source_schema(schema):
+    if tuple(schema) != HIERARCHICAL_SOURCE_SCHEMA:
+        raise ExtractionError(
+            "階層型土工表の種別・区分構成が想定と一致しません。"
+        )
+
+
+def _build_hierarchical_table_group(table, region, table_texts):
+    raw_records = sorted(
+        build_ba_records(table_texts),
+        key=lambda record: (-record["y"], record["x"]),
+    )
+    if len(raw_records) != 23:
+        raise ExtractionError(
+            f"階層型土工表の単位行が23件ではありません（{len(raw_records)}件）。"
+        )
+    invalid_quantities = [
+        record["数量"] for record in raw_records
+        if not (
+            isinstance(record["数量"], Decimal)
+            or record["数量"] == "-"
+        )
+    ]
+    if invalid_quantities:
+        raise ExtractionError(
+            f"階層型土工表に数値化できない数量があります（{invalid_quantities}）。"
+        )
+
+    kind_headers = sorted(
+        [header for header in table["headers"] if header["text"] == "種別"],
+        key=lambda header: header["x"],
+    )
+    division_headers = sorted(
+        [
+            text for text in table_texts
+            if text["text"] == "区分"
+            and abs(text["y"] - table["y"]) <= TABLE_HEADER_Y_TOLERANCE
+        ],
+        key=lambda text: text["x"],
+    )
+    if len(kind_headers) != 2 or len(division_headers) != 2:
+        raise ExtractionError("階層型土工表の種別・区分ヘッダーが不足しています。")
+
+    categorized_records = [
+        (
+            raw_record,
+            _hierarchical_category(
+                raw_record,
+                table,
+                region,
+                table_texts,
+                kind_headers,
+                division_headers,
+            ),
+        )
+        for raw_record in raw_records
+    ]
+    _validate_hierarchical_source_schema(
+        [
+            (category, raw_record["種別"])
+            for raw_record, category in categorized_records
+        ]
+    )
+
+    mapped = {}
+
+    def add_record(kind, source, quantity=None, combine=False):
+        value = source["数量"] if quantity is None else quantity
+        record = {
+            "x": source["x"],
+            "y": source["y"],
+            "種別": kind,
+            "単位": source["単位"],
+            "数量": value,
+        }
+        if kind in mapped:
+            if not combine:
+                raise ExtractionError(f"転記項目「{kind}」が重複しています。")
+            mapped[kind]["数量"] = _combine_table_quantities(
+                mapped[kind]["数量"],
+                value,
+            )
+        else:
+            mapped[kind] = record
+
+    for raw_record, category in categorized_records:
+        division = raw_record["種別"]
+
+        if category == "オープン掘削":
+            add_record("オープン掘削", raw_record)
+        elif (
+            category in HIERARCHICAL_WIDTH_CATEGORY
+            and division in HIERARCHICAL_WIDTH_SUFFIX
+        ):
+            base_kind = HIERARCHICAL_WIDTH_CATEGORY[category]
+            add_record(
+                base_kind + HIERARCHICAL_WIDTH_SUFFIX[division],
+                raw_record,
+                combine=base_kind == "路床盛土",
+            )
+        elif category in {"路肩盛土", "畦畔盛土"}:
+            add_record(category, raw_record)
+        elif category == "床堀り":
+            add_record("床掘", raw_record)
+        elif category == "埋戻し" and division in {"C", "D"}:
+            add_record(f"埋戻({division})", raw_record)
+        elif category == "法面整形工":
+            quantity_values = _row_quantity_values(
+                raw_record,
+                table_texts,
+            )
+            if len(quantity_values) != 2:
+                raise ExtractionError("法面整形工の左右数量を取得できませんでした。")
+            if division.startswith("切土部"):
+                prefix = "切土法面整形"
+            elif division.startswith("盛土部"):
+                prefix = "盛土法面整形"
+            else:
+                raise ExtractionError("法面整形工の切土・盛土区分を判定できません。")
+            add_record(f"{prefix}(左)", raw_record, quantity_values[0])
+            add_record(f"{prefix}(右)", raw_record, quantity_values[1])
+
+    missing = [
+        kind for kind in HIERARCHICAL_ALL_OUTPUT_KINDS
+        if kind not in mapped
+    ]
+    extra = [
+        kind for kind in mapped
+        if kind not in HIERARCHICAL_ALL_OUTPUT_KINDS
+    ]
+    if missing or extra:
+        raise ExtractionError(
+            f"階層型土工表の転記項目が一致しません"
+            f"（不足={missing}, 余分={extra}）。"
+        )
+
+    return [
+        mapped[kind]
+        for kind in HIERARCHICAL_ALL_OUTPUT_KINDS
+    ]
+
+
+def build_table_data_groups(all_texts, tables, table_regions):
+    """各土工表の罫線領域内だけからExcel転記用データを構築する。"""
+    if len(tables) != len(table_regions):
+        raise ExtractionError("土工表と罫線領域の件数が一致しません。")
+
+    groups = []
+    for table, region in zip(tables, table_regions):
+        table_texts = _texts_in_table_region(
+            all_texts,
+            table,
+            region,
+        )
+        division_headers = [
+            text for text in table_texts
+            if text["text"] == "区分"
+            and abs(text["y"] - table["y"]) <= TABLE_HEADER_Y_TOLERANCE
+        ]
+        if division_headers:
+            group = _build_hierarchical_table_group(
+                table,
+                region,
+                table_texts,
+            )
+        else:
+            group = _build_legacy_table_group(table_texts)
+        groups.append(group)
+
+    return groups
 
 
 def assign_data_groups_to_tables(tables, data_groups):
@@ -535,10 +1220,19 @@ def resolve_table_stations(tables, stations, center_markers):
     ]
 
 
-def extract_output_records(all_texts):
-    """DXFのTEXTから、Excel転記前のレコードを副作用なしで抽出する。"""
+def extract_output_records(all_texts, all_lines):
+    """DXFのTEXT・LINEから、Excel転記前のレコードを副作用なしで抽出する。"""
     tables = detect_earthwork_tables(all_texts)
-    data_groups = build_table_data_groups(all_texts)
+    table_regions = detect_table_regions(
+        tables,
+        all_lines,
+        all_texts,
+    )
+    data_groups = build_table_data_groups(
+        all_texts,
+        tables,
+        table_regions,
+    )
     table_data_groups = assign_data_groups_to_tables(tables, data_groups)
 
     stations = extract_no_texts(all_texts)
@@ -556,6 +1250,527 @@ def extract_output_records(all_texts):
     out_data.sort(key=sort_key)
     return out_data
 
+
+# ==================================================
+# 可変件数のExcel帳票
+# ==================================================
+
+AVERAGE_FORMULA_PATTERN = re.compile(
+    r"\((\$?[A-Z]{1,3}\$?\d+)\+(\$?[A-Z]{1,3}\$?\d+)\)/2"
+)
+CELL_ROW_REFERENCE_PATTERN = re.compile(
+    r"(\$?[A-Z]{1,3}\$?)(\d+)"
+)
+
+
+def infer_station_interval(out_data):
+    """測点列が厳密に増加する最小の測点間隔を選ぶ。"""
+    if not out_data:
+        raise ExtractionError("測点がありません。")
+
+    for interval in STATION_INTERVAL_CANDIDATES:
+        positions = [
+            (
+                item["測点"] * interval
+                + (
+                    Decimal("0")
+                    if item["追加距離"] is None
+                    else item["追加距離"]
+                )
+            )
+            for item in out_data
+        ]
+        if all(
+            current > previous
+            for previous, current in zip(positions, positions[1:])
+        ):
+            return interval
+
+    raise ExtractionError(
+        "測点間隔を20mまたは100mのいずれにも決定できませんでした。"
+    )
+
+
+def _make_formula_dash_safe(formula):
+    return AVERAGE_FORMULA_PATTERN.sub(
+        lambda match: (
+            f"SUM({match.group(1)}:{match.group(2)})/2"
+        ),
+        formula,
+    )
+
+
+def _remap_formula_rows(formula, row_mapping):
+    def replace(match):
+        row = int(match.group(2))
+        mapped_row = row_mapping.get(row, row)
+        return f"{match.group(1)}{mapped_row}"
+
+    return CELL_ROW_REFERENCE_PATTERN.sub(replace, formula)
+
+
+def _snapshot_row(ws, row):
+    dimension = ws.row_dimensions[row]
+    return {
+        "row": row,
+        "height": dimension.height,
+        "hidden": dimension.hidden,
+        "outline_level": dimension.outlineLevel,
+        "collapsed": dimension.collapsed,
+        "cells": [
+            {
+                "coordinate": cell.coordinate,
+                "value": cell.value,
+                "style": copy(cell._style),
+                "comment": copy(cell.comment),
+            }
+            for cell in ws[row]
+        ],
+    }
+
+
+def _apply_row_snapshot(
+    ws,
+    snapshot,
+    destination_row,
+    *,
+    translate=False,
+    row_mapping=None,
+    dash_safe=False,
+):
+    for column, source in enumerate(snapshot["cells"], start=1):
+        target = ws.cell(destination_row, column)
+        target._style = copy(source["style"])
+        target.comment = copy(source["comment"])
+
+        value = source["value"]
+        if isinstance(value, str) and value.startswith("="):
+            if row_mapping is not None:
+                value = _remap_formula_rows(value, row_mapping)
+            elif translate:
+                value = Translator(
+                    value,
+                    origin=source["coordinate"],
+                ).translate_formula(target.coordinate)
+            if dash_safe:
+                value = _make_formula_dash_safe(value)
+        target.value = value
+
+    dimension = ws.row_dimensions[destination_row]
+    dimension.height = snapshot["height"]
+    dimension.hidden = snapshot["hidden"]
+    dimension.outlineLevel = snapshot["outline_level"]
+    dimension.collapsed = snapshot["collapsed"]
+
+
+def _update_detail_defined_names(
+    ws,
+    data_last_row,
+    report_last_row,
+):
+    data_names = {
+        "_1B",
+        "_1F",
+        "_2B",
+        "_2F",
+        "_3F",
+        "_4F",
+        "_Fill",
+    }
+    report_names = {
+        "_1P",
+        "AREA",
+        "AREA1",
+        "Print_Area_MI",
+    }
+
+    for name, defined_name in ws.defined_names.items():
+        if name in data_names:
+            end_row = data_last_row
+        elif name in report_names:
+            end_row = report_last_row
+        else:
+            continue
+        defined_name.attr_text = re.sub(
+            r"\$\d+$",
+            f"${end_row}",
+            defined_name.attr_text,
+        )
+
+
+def _configure_detail_sheet(ws, station_count, *, slope=False):
+    data_last_row = ROW_START + station_count
+    if slope:
+        template_data_last = 39
+        template_total_rows = (40, 41, 42)
+        subtotal_row = max(40, data_last_row + 1)
+        total_row = subtotal_row + 1
+        side_total_row = total_row + 1
+        target_total_rows = (
+            subtotal_row,
+            total_row,
+            side_total_row,
+        )
+        row_mapping = {
+            template_data_last: data_last_row,
+            40: subtotal_row,
+            41: total_row,
+            42: side_total_row,
+        }
+        print_last_row = side_total_row
+        report_last_row = total_row
+    else:
+        template_data_last = 40
+        template_total_rows = (41, 42)
+        subtotal_row = max(41, data_last_row + 1)
+        total_row = subtotal_row + 1
+        target_total_rows = (subtotal_row, total_row)
+        row_mapping = {
+            template_data_last: data_last_row,
+            41: subtotal_row,
+            42: total_row,
+        }
+        side_total_row = None
+        print_last_row = total_row
+        report_last_row = total_row
+
+    detail_template = _snapshot_row(ws, 7)
+    total_templates = [
+        _snapshot_row(ws, row)
+        for row in template_total_rows
+    ]
+
+    for row in range(7, data_last_row + 1):
+        _apply_row_snapshot(
+            ws,
+            detail_template,
+            row,
+            translate=True,
+            dash_safe=True,
+        )
+        ws.cell(row, 1).value = row - ROW_START
+
+    for snapshot, target_row in zip(
+        total_templates,
+        target_total_rows,
+    ):
+        _apply_row_snapshot(
+            ws,
+            snapshot,
+            target_row,
+            row_mapping=row_mapping,
+            dash_safe=True,
+        )
+
+    end_column = "T" if ws.title == "路体" else "R"
+    ws.print_area = f"B1:{end_column}{print_last_row}"
+    ws.print_title_rows = "1:5"
+    _update_detail_defined_names(
+        ws,
+        data_last_row,
+        report_last_row,
+    )
+
+    for page_break_row in range(40, data_last_row, 35):
+        ws.row_breaks.append(Break(id=page_break_row))
+
+    return {
+        "data_last_row": data_last_row,
+        "subtotal_row": subtotal_row,
+        "total_row": total_row,
+        "side_total_row": side_total_row,
+    }
+
+
+def _set_input_formulas(ws, out_data):
+    station_count = len(out_data)
+    input_last_row = ROW_START + station_count - 1
+    if input_last_row > ws.max_row:
+        raise ExtractionError(
+            f"入力シートの上限を超えています（{station_count}件）。"
+        )
+
+    interval = infer_station_interval(out_data)
+    ws.cell(row=4, column=5).value = int(interval)
+
+    for row in range(ROW_START, input_last_row + 1):
+        if row > ROW_START:
+            ws.cell(row=row, column=6).value = (
+                f'=IF(ISBLANK(C{row}),"",'
+                f"(C{row}-C{row - 1})*$E$4"
+                f"+(E{row}-E{row - 1}))"
+            )
+        ws[f"AE{row}"] = f"=G{row}"
+        ws[f"AF{row}"] = f"=SUM(K{row}:X{row})"
+        ws[f"AG{row}"] = f"=SUM(Y{row}:Z{row})"
+        ws[f"AH{row}"] = f"=SUM(AA{row}:AB{row})"
+
+    return input_last_row
+
+
+def _quantity_by_kind(record):
+    return {
+        data["種別"]: data["数量"]
+        for data in record["データ"]
+    }
+
+
+def _populate_work_earthwork_sheet(ws, out_data, layout):
+    ws["M3"] = "埋戻(C)"
+
+    for index, record in enumerate(out_data):
+        row = ROW_START + 1 + index
+        quantities = _quantity_by_kind(record)
+        if set(HIERARCHICAL_WORK_OUTPUT_KINDS) <= quantities.keys():
+            work_quantities = {
+                kind: quantities[kind]
+                for kind in HIERARCHICAL_WORK_OUTPUT_KINDS
+            }
+        elif {"床掘", "埋戻"} <= quantities.keys():
+            work_quantities = {
+                "床掘": quantities["床掘"],
+                "埋戻(C)": "-",
+                "埋戻(D)": quantities["埋戻"],
+            }
+        else:
+            raise ExtractionError(
+                "作業土工の床掘・埋戻数量を特定できませんでした。"
+            )
+
+        for column, kind in (
+            (7, "床掘"),
+            (10, "埋戻(D)"),
+            (13, "埋戻(C)"),
+        ):
+            cell = ws.cell(row=row, column=column)
+            cell.value = work_quantities[kind]
+            cell.alignment = Alignment(horizontal="right")
+
+        for column in (16, 17, 18):
+            ws.cell(row=row, column=column).value = None
+
+        if row == ROW_START + 1:
+            for column in (8, 9, 11, 12, 14, 15):
+                ws.cell(row=row, column=column).value = None
+            continue
+
+        previous_row = row - 1
+        for area_column, average_column, volume_column in (
+            ("G", "H", "I"),
+            ("J", "K", "L"),
+            ("M", "N", "O"),
+        ):
+            ws[f"{average_column}{row}"] = (
+                f'=IF(ISBLANK($C{row}),"",'
+                f"SUM({area_column}{previous_row}:"
+                f"{area_column}{row})/2)"
+            )
+            ws[f"{volume_column}{row}"] = (
+                f'=ROUND(IF(ISBLANK($C{row}),"",'
+                f"$F{row}*{average_column}{row}),1)"
+            )
+
+    subtotal_row = layout["subtotal_row"]
+    total_row = layout["total_row"]
+    for column in ("I", "L", "O"):
+        ws[f"{column}{subtotal_row}"] = (
+            f"=SUM({column}7:{column}{layout['data_last_row']})"
+        )
+        ws[f"{column}{total_row}"] = f"={column}{subtotal_row}"
+
+
+def _add_road_shoulder_to_roadbed(ws, layout):
+    ws["P3"] = '=IF(入力!T2="","",入力!T2)'
+    ws["P6"] = "=入力!T5"
+
+    for row in range(7, layout["data_last_row"] + 1):
+        input_row = row - 1
+        ws[f"P{row}"] = f"=入力!T{input_row}"
+        ws[f"Q{row}"] = (
+            f'=IF(ISBLANK($C{row}),"",'
+            f"SUM(P{row - 1}:P{row})/2)"
+        )
+        ws[f"R{row}"] = (
+            f'=ROUND(IF(ISBLANK($C{row}),"",'
+            f"$F{row}*Q{row}),1)"
+        )
+
+    subtotal_row = layout["subtotal_row"]
+    total_row = layout["total_row"]
+    ws[f"R{subtotal_row}"] = (
+        f"=SUM(R7:R{layout['data_last_row']})"
+    )
+    ws[f"R{total_row}"] = f"=R{subtotal_row}"
+
+
+def _repair_check_sheet(ws, input_last_row, station_count):
+    ws["C4"] = (
+        f"=INDEX(入力!$C$5:$C${input_last_row},$C$2)"
+    )
+    ws["E4"] = (
+        f"=INDEX(入力!$E$5:$E${input_last_row},$C$2)"
+    )
+
+    for row in range(5, 33):
+        ws[f"C{row}"] = None
+        ws[f"D{row}"] = None
+
+    for cell, value in {
+        "B5": "掘削",
+        "B9": "盛土①",
+        "B13": "盛土②",
+        "B17": "盛土③",
+        "B21": "法面",
+        "B25": None,
+        "B29": None,
+    }.items():
+        ws[cell] = value
+
+    row_to_input_column = {
+        5: "G",
+        9: "K",
+        10: "N",
+        11: "O",
+        13: "Q",
+        14: "R",
+        15: "S",
+        16: "T",
+        17: "U",
+        18: "V",
+        19: "W",
+        20: "X",
+        21: "Y",
+        22: "Z",
+        23: "AA",
+        24: "AB",
+    }
+    for row, column in row_to_input_column.items():
+        ws[f"C{row}"] = (
+            f'=IF(入力!{column}$2="","",入力!{column}$2)'
+        )
+        ws[f"D{row}"] = (
+            f"=INDEX(入力!${column}$5:"
+            f"${column}${input_last_row},$C$2)"
+        )
+
+    ws.data_validations.dataValidation = []
+    validation = DataValidation(
+        type="whole",
+        operator="between",
+        formula1="1",
+        formula2=str(station_count),
+        allow_blank=False,
+    )
+    validation.error = f"1から{station_count}までを入力してください。"
+    validation.errorTitle = "セル番号が範囲外です"
+    validation.prompt = (
+        f"確認する測点のセル番号（1～{station_count}）"
+    )
+    validation.promptTitle = "セル番号"
+    validation.showErrorMessage = True
+    validation.showInputMessage = True
+    ws.add_data_validation(validation)
+    validation.add(ws["C2"])
+
+
+def _update_downstream_formulas(wb, layouts):
+    standard_total = layouts["掘削"]["total_row"]
+    slope_side_total = layouts["法面整形"]["side_total_row"]
+    work_total = layouts["作業土工1"]["total_row"]
+
+    summary = wb["集計表"]
+    for cell, formula in {
+        "F5": f"=掘削!I{standard_total}",
+        "F7": f"=路体!I{layouts['路体']['total_row']}",
+        "F8": f"=路体!N{layouts['路体']['total_row']}",
+        "F9": f"=路体!Q{layouts['路体']['total_row']}",
+        "F10": f"=路床!I{layouts['路床']['total_row']}",
+        "F11": f"=路床!L{layouts['路床']['total_row']}",
+        "F12": f"=路床!O{layouts['路床']['total_row']}",
+        "F13": f"=路体外!I{layouts['路体外']['total_row']}",
+        "F14": f"=路体外!L{layouts['路体外']['total_row']}",
+        "F15": f"=路体外!O{layouts['路体外']['total_row']}",
+        "F16": f"=路体外!R{layouts['路体外']['total_row']}",
+        "F20": f"=法面整形!L{slope_side_total}",
+        "F21": f"=法面整形!R{slope_side_total}",
+    }.items():
+        summary[cell] = formula
+    summary["C17"] = "路肩盛土"
+    summary["E17"] = "m3"
+    summary["F17"] = f"=路床!R{layouts['路床']['total_row']}"
+    summary["G17"] = "BA3"
+
+    surplus = wb["残土"]
+    for cell, formula in {
+        "E5": f"=掘削!I{standard_total}",
+        "E9": f"=路体!I{layouts['路体']['total_row']}",
+        "E10": f"=路体!N{layouts['路体']['total_row']}",
+        "E11": f"=路体!Q{layouts['路体']['total_row']}",
+        "E13": f"=路床!I{layouts['路床']['total_row']}",
+        "E14": f"=路床!L{layouts['路床']['total_row']}",
+        "E15": f"=路床!O{layouts['路床']['total_row']}",
+        "E17": f"=路体外!I{layouts['路体外']['total_row']}",
+        "E18": f"=路体外!L{layouts['路体外']['total_row']}",
+        "E19": f"=路体外!O{layouts['路体外']['total_row']}",
+        "E21": f"=路体外!R{layouts['路体外']['total_row']}",
+    }.items():
+        surplus[cell] = formula
+    surplus["B16"] = "路肩盛土"
+    surplus["D16"] = "m3"
+    surplus["E16"] = f"=路床!R{layouts['路床']['total_row']}"
+    surplus["F16"] = Decimal("0.9")
+    surplus["G16"] = "=ROUND(E16/F16,1)"
+
+    work_summary = wb["作業土工2"]
+    work_summary["G5"] = f"=作業土工1!I{work_total}"
+    work_summary["H5"] = f"=作業土工1!O{work_total}"
+    work_summary["I5"] = f"=作業土工1!L{work_total}"
+
+
+def _prepare_dynamic_workbook(wb, out_data):
+    station_count = len(out_data)
+    input_sheet = wb[SHEET_NAME]
+    input_last_row = _set_input_formulas(input_sheet, out_data)
+
+    layouts = {}
+    for sheet_name in (
+        "掘削",
+        "路体",
+        "路床",
+        "路体外",
+        "作業土工1",
+    ):
+        layouts[sheet_name] = _configure_detail_sheet(
+            wb[sheet_name],
+            station_count,
+        )
+    layouts["法面整形"] = _configure_detail_sheet(
+        wb["法面整形"],
+        station_count,
+        slope=True,
+    )
+
+    _add_road_shoulder_to_roadbed(
+        wb["路床"],
+        layouts["路床"],
+    )
+    _populate_work_earthwork_sheet(
+        wb["作業土工1"],
+        out_data,
+        layouts["作業土工1"],
+    )
+    _update_downstream_formulas(wb, layouts)
+    _repair_check_sheet(
+        wb["チェック"],
+        input_last_row,
+        station_count,
+    )
+
+    wb.calculation.calcMode = "auto"
+    wb.calculation.fullCalcOnLoad = True
+    wb.calculation.forceFullCalc = True
+
+
 # ==================================================
 # メイン
 # ==================================================
@@ -563,6 +1778,20 @@ def extract_output_records(all_texts):
 def write_output_workbook(template_path, output_path, out_data):
     wb = load_workbook(template_path)
     try:
+        is_hierarchical = bool(out_data) and all(
+            set(HIERARCHICAL_WORK_OUTPUT_KINDS)
+            <= {
+                data["種別"]
+                for data in record["データ"]
+            }
+            for record in out_data
+        )
+        if (
+            len(out_data) > VERIFIED_LEGACY_RECORD_COUNT
+            or is_hierarchical
+        ):
+            _prepare_dynamic_workbook(wb, out_data)
+
         ws = wb[SHEET_NAME]
 
         for r, item in enumerate(out_data):
@@ -604,21 +1833,32 @@ def proc(dxf_files):
     failures = []
     for dxf_file in glob.glob(os.path.join(input_dir, "*.dxf")):
         print(dxf_file)
-        doc = polyline_to_line_keep_others.main(ezdxf.readfile(dxf_file))
-        all_texts = collect_all_texts(doc.modelspace())
-
         try:
-            out_data = extract_output_records(all_texts)
-        except ExtractionError as exc:
+            doc = ezdxf.readfile(dxf_file)
+            modelspace = doc.modelspace()
+            all_texts = collect_all_texts(modelspace)
+            all_lines = collect_all_lines(modelspace)
+            out_data = extract_output_records(all_texts, all_lines)
+
+            name = (
+                TEMPLATE_BASE
+                + "_"
+                + os.path.splitext(os.path.basename(dxf_file))[0]
+            )
+            output_path = os.path.join(
+                output_subfolder,
+                name + ".xlsx",
+            )
+            write_output_workbook(
+                template_path,
+                output_path,
+                out_data,
+            )
+            shutil.move(dxf_file, input_subfolder)
+        except Exception as exc:
             failures.append(f"{os.path.basename(dxf_file)}: {exc}")
             continue
 
-        # ---------- Excel ----------
-        name = TEMPLATE_BASE + "_" + os.path.splitext(os.path.basename(dxf_file))[0]
-        output_path = os.path.join(output_subfolder, name + ".xlsx")
-        write_output_workbook(template_path, output_path, out_data)
-
-        shutil.move(dxf_file, input_subfolder)
         dxf_files.append(os.path.basename(dxf_file))
 
     return dxf_files, failures
