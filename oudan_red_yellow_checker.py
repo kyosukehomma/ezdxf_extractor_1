@@ -40,24 +40,22 @@ MERGE_Y_TOLERANCE =  1.0
 
 EARTHWORK_TEXT_LAYER_PREFIX = "D-MTR-TXT"
 EARTHWORK_HEADER_SEQUENCE = ("種別", "単位", "数量", "種別", "単位", "数量")
-SYMBOL_TABLE_HEADER_SEQUENCE = (
-    "記号",
+CATEGORY_TABLE_HEADER_SEQUENCE = (
     "種別",
     "区分",
     "数量",
-    "記号",
     "種別",
     "区分",
     "数量",
 )
-SYMBOL_TABLE_LINE_LAYER = "D-MTR-LINE"
-SYMBOL_TABLE_FORMAT = "symbol_quantity"
-SYMBOL_TABLE_HEADER_X_SPAN_MIN = 20.0
-SYMBOL_TABLE_HEADER_X_SPAN_MAX = 30.0
-SYMBOL_TABLE_SYMBOL_PAIR_X_MIN = 12.5
-SYMBOL_TABLE_SYMBOL_PAIR_X_MAX = 13.7
-SYMBOL_TABLE_SYMBOL_PAIR_Y_TOLERANCE = 0.2
-SYMBOL_TABLE_HEADER_Y_TOLERANCE = 0.3
+CATEGORY_TABLE_LINE_LAYER = "D-MTR-LINE"
+CATEGORY_TABLE_FORMAT = "category_quantity"
+CATEGORY_TABLE_HEADER_X_SPAN_MIN = 19.5
+CATEGORY_TABLE_HEADER_X_SPAN_MAX = 22.0
+CATEGORY_TABLE_KIND_PAIR_X_MIN = 12.5
+CATEGORY_TABLE_KIND_PAIR_X_MAX = 13.7
+CATEGORY_TABLE_KIND_PAIR_Y_TOLERANCE = 0.2
+CATEGORY_TABLE_HEADER_Y_TOLERANCE = 0.3
 TABLE_HEADER_Y_TOLERANCE = 0.15
 TABLE_HEADER_X_GAP = 50.0
 MAX_DATA_GROUP_TO_TABLE_DISTANCE = 10.0
@@ -170,34 +168,49 @@ HIERARCHICAL_ALL_OUTPUT_KINDS = (
     HIERARCHICAL_OUTPUT_KINDS
     + HIERARCHICAL_WORK_OUTPUT_KINDS
 )
-SYMBOL_TABLE_SOURCE_SCHEMA = (
-    ("CA1", "オープン掘削"),
-    ("BA1-1", "路体盛土(W＜2.5m)"),
-    ("BA1-2", "路体盛土(2.5m≦W＜4.0m)"),
-    ("BA1-3", "路体盛土(4.0m≦W)"),
-    ("BA2-1", "路床盛土(W＜2.5m)"),
-    ("BA2-2", "路床盛土(2.5m≦W＜4.0m)"),
-    ("BA2-3", "路床盛土(4.0m≦W)"),
-    ("BA3", "路肩盛土"),
-    ("BA4-1", "路体外盛土(W＜2.5m)"),
-    ("BA4-2", "路体外盛土(2.5m≦W＜4.0m)"),
-    ("BA4-3", "路体外盛土(4.0m≦W)"),
-    ("BA5", "畦畔盛土"),
-    ("CL1", "切土法面整形(左)"),
-    ("BL1", "盛土法面整形(左)"),
+CATEGORY_TABLE_SOURCE_SCHEMA = (
+    ("オープン掘削", ((None, "オープン掘削"),)),
+    (
+        "路体盛土",
+        (
+            ("(W＜2.5m)", "路体盛土(W＜2.5m)"),
+            ("(2.5m≦W＜4.0m)", "路体盛土(2.5m≦W＜4.0m)"),
+            ("(4.0m≦W)", "路体盛土(4.0m≦W)"),
+        ),
+    ),
+    (
+        "路床盛土",
+        (
+            ("(W＜2.5m)", "路床盛土(W＜2.5m)"),
+            ("(2.5m≦W＜4.0m)", "路床盛土(2.5m≦W＜4.0m)"),
+            ("(4.0m≦W)", "路床盛土(4.0m≦W)"),
+        ),
+    ),
+    ("路肩盛土", ((None, "路肩盛土"),)),
+    (
+        "路体外盛土",
+        (
+            ("(W＜2.5m)", "路体外盛土(W＜2.5m)"),
+            ("(2.5m≦W＜4.0m)", "路体外盛土(2.5m≦W＜4.0m)"),
+            ("(4.0m≦W)", "路体外盛土(4.0m≦W)"),
+        ),
+    ),
+    ("畦畔盛土", ((None, "畦畔盛土"),)),
+    ("切土法面整形", ((None, "切土法面整形(左)"),)),
+    ("盛土法面整形", ((None, "盛土法面整形(左)"),)),
 )
-SYMBOL_TABLE_RIGHT_OUTPUT_KINDS = (
+CATEGORY_TABLE_RIGHT_OUTPUT_KINDS = (
     "切土法面整形(右)",
     "盛土法面整形(右)",
 )
-SYMBOL_TABLE_ALIGNMENT_ORDER = (
+CATEGORY_TABLE_ALIGNMENT_ORDER = (
     "本線",
     "Aランプ",
     "Bランプ",
     "Cランプ",
     "Dランプ",
 )
-SYMBOL_TABLE_MAINLINE_STATION_MIN = 100
+CATEGORY_TABLE_MAINLINE_STATION_MIN = 100
 
 STATION_TEXT_LAYER = "D-BMK-HTXT"
 CENTER_MARKER_LAYER = "D-BMK"
@@ -538,66 +551,67 @@ def _detect_unit_tables(all_texts):
     return tables
 
 
-def _detect_symbol_quantity_tables(all_texts):
+def _detect_category_quantity_tables(all_texts):
     """
-    左右2組の「記号・種別・区分・数量」ヘッダーを検出する。
+    左右2組の「種別・区分・数量」ヘッダーを検出する。
 
     この形式は同じ表のヘッダー間でもY座標に僅かな差があるため、
-    左右の「記号」の相対位置を起点に8項目を照合する。
+    左右の「種別」の相対位置を起点に6項目を照合する。
+    記号列のヘッダーと値は検出にも抽出にも使用しない。
     """
-    header_words = set(SYMBOL_TABLE_HEADER_SEQUENCE)
-    symbol_headers = [
+    header_words = set(CATEGORY_TABLE_HEADER_SEQUENCE)
+    kind_headers = [
         text for text in all_texts
         if text.get("layer", "").startswith(EARTHWORK_TEXT_LAYER_PREFIX)
-        and text["text"] == "記号"
+        and text["text"] == "種別"
     ]
 
     tables = []
-    for left_symbol in symbol_headers:
-        right_symbols = [
-            text for text in symbol_headers
-            if text["layer"] == left_symbol["layer"]
-            and SYMBOL_TABLE_SYMBOL_PAIR_X_MIN
-            < text["x"] - left_symbol["x"]
-            < SYMBOL_TABLE_SYMBOL_PAIR_X_MAX
-            and abs(text["y"] - left_symbol["y"])
-            <= SYMBOL_TABLE_SYMBOL_PAIR_Y_TOLERANCE
+    for left_kind in kind_headers:
+        right_kinds = [
+            text for text in kind_headers
+            if text["layer"] == left_kind["layer"]
+            and CATEGORY_TABLE_KIND_PAIR_X_MIN
+            < text["x"] - left_kind["x"]
+            < CATEGORY_TABLE_KIND_PAIR_X_MAX
+            and abs(text["y"] - left_kind["y"])
+            <= CATEGORY_TABLE_KIND_PAIR_Y_TOLERANCE
         ]
-        if len(right_symbols) != 1:
+        if len(right_kinds) != 1:
             continue
 
-        right_symbol = right_symbols[0]
+        right_kind = right_kinds[0]
         candidates = sorted(
             [
                 text for text in all_texts
-                if text["layer"] == left_symbol["layer"]
+                if text["layer"] == left_kind["layer"]
                 and text["text"] in header_words
-                and left_symbol["x"] - SYMBOL_TABLE_SYMBOL_PAIR_Y_TOLERANCE
+                and left_kind["x"] - CATEGORY_TABLE_KIND_PAIR_Y_TOLERANCE
                 <= text["x"]
-                <= right_symbol["x"] + 10.0
-                and abs(text["y"] - left_symbol["y"])
-                <= SYMBOL_TABLE_HEADER_Y_TOLERANCE
+                <= right_kind["x"] + 7.5
+                and abs(text["y"] - left_kind["y"])
+                <= CATEGORY_TABLE_HEADER_Y_TOLERANCE
             ],
             key=lambda text: text["x"],
         )
         ordered_words = tuple(text["text"] for text in candidates)
-        if ordered_words != SYMBOL_TABLE_HEADER_SEQUENCE:
+        if ordered_words != CATEGORY_TABLE_HEADER_SEQUENCE:
             continue
 
         header_span = candidates[-1]["x"] - candidates[0]["x"]
         if not (
-            SYMBOL_TABLE_HEADER_X_SPAN_MIN
+            CATEGORY_TABLE_HEADER_X_SPAN_MIN
             <= header_span
-            <= SYMBOL_TABLE_HEADER_X_SPAN_MAX
+            <= CATEGORY_TABLE_HEADER_X_SPAN_MAX
         ):
             continue
 
         tables.append({
             "x": sum(text["x"] for text in candidates) / len(candidates),
             "y": sum(text["y"] for text in candidates) / len(candidates),
-            "layer": left_symbol["layer"],
-            "line_layer": SYMBOL_TABLE_LINE_LAYER,
-            "format": SYMBOL_TABLE_FORMAT,
+            "layer": left_kind["layer"],
+            "line_layer": CATEGORY_TABLE_LINE_LAYER,
+            "format": CATEGORY_TABLE_FORMAT,
             "headers": tuple(candidates),
         })
 
@@ -608,7 +622,7 @@ def detect_earthwork_tables(all_texts):
     """対応する各ヘッダー形式から土工表を検出する。"""
     tables = (
         _detect_unit_tables(all_texts)
-        + _detect_symbol_quantity_tables(all_texts)
+        + _detect_category_quantity_tables(all_texts)
     )
     tables.sort(key=lambda t: (-t["y"], t["x"]))
     return tables
@@ -693,7 +707,7 @@ def detect_table_regions(tables, all_lines, all_texts):
     component_line_layers = {
         table.get("line_layer", table["layer"])
         for table in tables
-        if table.get("format") == SYMBOL_TABLE_FORMAT
+        if table.get("format") == CATEGORY_TABLE_FORMAT
     }
 
     for line in all_lines:
@@ -734,14 +748,14 @@ def detect_table_regions(tables, all_lines, all_texts):
             if line["layer"] == line_layer
         ]
         if not layer_lines:
-            raise ExtractionError("記号型土工表の罫線を検出できませんでした。")
+            raise ExtractionError("種別型土工表の罫線を検出できませんでした。")
 
         for line in layer_lines:
             dx = abs(line["end_x"] - line["start_x"])
             dy = abs(line["end_y"] - line["start_y"])
             if dx > LINE_AXIS_TOLERANCE and dy > LINE_AXIS_TOLERANCE:
                 raise ExtractionError(
-                    "記号型土工表レイヤーに斜めのLINEがあります。"
+                    "種別型土工表レイヤーに斜めのLINEがあります。"
                 )
 
         text_heights = sorted(
@@ -773,7 +787,7 @@ def detect_table_regions(tables, all_lines, all_texts):
             ]
             if len(matching_indexes) != 1:
                 raise ExtractionError(
-                    "記号型土工表の罫線をヘッダーへ一意に対応付け"
+                    "種別型土工表の罫線をヘッダーへ一意に対応付け"
                     "できません。"
                 )
             assignments[matching_indexes[0]].extend(component)
@@ -1211,64 +1225,151 @@ def _build_hierarchical_table_group(table, region, table_texts):
     ]
 
 
-def _symbol_table_quantity(symbol, table, table_texts):
-    symbols = [
-        text for text in table_texts
-        if text["text"] == symbol
-    ]
-    if len(symbols) != 1:
-        raise ExtractionError(
-            f"記号型土工表の記号「{symbol}」を一意に特定できません。"
-        )
-
-    symbol_text = symbols[0]
-    quantity_headers = sorted(
+def _table_row_bounds(region, x):
+    tolerance = (
+        region["text_height"] * LINE_CONNECTION_TOLERANCE_FACTOR
+    )
+    levels = _unique_axis_values(
         [
-            header for header in table["headers"]
-            if header["text"] == "数量"
+            (line["start_y"] + line["end_y"]) / 2
+            for line in region["main_lines"]
+            if abs(line["end_y"] - line["start_y"])
+            <= LINE_AXIS_TOLERANCE
+            and min(line["start_x"], line["end_x"]) - tolerance
+            <= x
+            <= max(line["start_x"], line["end_x"]) + tolerance
         ],
-        key=lambda header: header["x"],
+        tolerance,
     )
-    if len(quantity_headers) != 2:
-        raise ExtractionError("記号型土工表の数量ヘッダーが不足しています。")
+    if len(levels) < 2:
+        raise ExtractionError("種別型土工表の行境界を取得できません。")
+    return [
+        (levels[index], levels[index + 1])
+        for index in range(len(levels) - 1)
+    ]
 
-    center_x = sum(header["x"] for header in table["headers"]) / len(
-        table["headers"]
-    )
-    quantity_x = quantity_headers[0 if symbol_text["x"] < center_x else 1]["x"]
-    candidates = [
+
+def _category_table_row_quantity(
+    table_texts,
+    row_bounds,
+    quantity_x,
+    division_bounds,
+    expected_division,
+    category,
+):
+    lower_y, upper_y = row_bounds
+    tolerance = TOLERANCE_Y_ROW * 0.05
+    quantities = [
         text for text in table_texts
-        if abs(text["y"] - symbol_text["y"]) <= TOLERANCE_Y_ROW
+        if lower_y - tolerance <= text["y"] <= upper_y + tolerance
         and abs(text["x"] - quantity_x) <= 1.5
         and _parse_table_quantity(text["text"]) is not None
     ]
-    if len(candidates) != 1:
+    if len(quantities) != 1:
         raise ExtractionError(
-            f"記号型土工表の記号「{symbol}」に対応する数量を"
+            f"種別型土工表の「{category}」に対応する数量を"
             "一意に特定できません。"
         )
 
-    return symbol_text, _parse_table_quantity(candidates[0]["text"])
-
-
-def _build_symbol_quantity_table_group(table, table_texts):
-    """記号をキーに数量を読み、左右なしの法面整形は左へ割り当てる。"""
-    mapped = {}
-    for symbol, output_kind in SYMBOL_TABLE_SOURCE_SCHEMA:
-        source, quantity = _symbol_table_quantity(
-            symbol,
-            table,
-            table_texts,
+    division_min_x, division_max_x = division_bounds
+    divisions = [
+        text for text in table_texts
+        if lower_y - tolerance <= text["y"] <= upper_y + tolerance
+        and division_min_x <= text["x"] <= division_max_x
+    ]
+    actual_divisions = [text["text"] for text in divisions]
+    expected_divisions = (
+        [] if expected_division is None else [expected_division]
+    )
+    if actual_divisions != expected_divisions:
+        raise ExtractionError(
+            f"種別型土工表の「{category}」の区分が一致しません"
+            f"（期待={expected_divisions}, 実際={actual_divisions}）。"
         )
-        mapped[output_kind] = {
-            "x": source["x"],
-            "y": source["y"],
-            "種別": output_kind,
-            "単位": "",
-            "数量": quantity,
-        }
 
-    for output_kind in SYMBOL_TABLE_RIGHT_OUTPUT_KINDS:
+    return _parse_table_quantity(quantities[0]["text"])
+
+
+def _build_category_quantity_table_group(table, region, table_texts):
+    """
+    種別・区分・数量と罫線行から数量を読む。
+
+    記号列は使用せず、左右なしの法面整形は左へ割り当てる。
+    """
+    headers = {
+        header_text: sorted(
+            [
+                header for header in table["headers"]
+                if header["text"] == header_text
+            ],
+            key=lambda header: header["x"],
+        )
+        for header_text in ("種別", "区分", "数量")
+    }
+    if any(len(values) != 2 for values in headers.values()):
+        raise ExtractionError("種別型土工表のヘッダーが不足しています。")
+
+    center_x = (
+        region["main_bounds"]["min_x"]
+        + region["main_bounds"]["max_x"]
+    ) / 2
+    mapped = {}
+    for category, divisions in CATEGORY_TABLE_SOURCE_SCHEMA:
+        category_texts = [
+            text for text in table_texts
+            if text["text"] == category
+        ]
+        if len(category_texts) != 1:
+            raise ExtractionError(
+                f"種別型土工表の種別「{category}」を"
+                "一意に特定できません。"
+            )
+
+        category_text = category_texts[0]
+        side_index = 0 if category_text["x"] < center_x else 1
+        kind_x = headers["種別"][side_index]["x"]
+        division_x = headers["区分"][side_index]["x"]
+        quantity_x = headers["数量"][side_index]["x"]
+        rows = _table_row_bounds(region, quantity_x)
+        category_row_indexes = [
+            index for index, (lower_y, upper_y) in enumerate(rows)
+            if lower_y <= category_text["y"] <= upper_y
+        ]
+        if len(category_row_indexes) != 1:
+            raise ExtractionError(
+                f"種別型土工表の種別「{category}」の行を"
+                "一意に特定できません。"
+            )
+
+        category_row_index = category_row_indexes[0]
+        division_bounds = (
+            (kind_x + division_x) / 2,
+            (division_x + quantity_x) / 2,
+        )
+        for offset, (division, output_kind) in enumerate(divisions):
+            row_index = category_row_index - offset
+            if row_index < 0:
+                raise ExtractionError(
+                    f"種別型土工表の種別「{category}」の"
+                    "数量行が不足しています。"
+                )
+            quantity = _category_table_row_quantity(
+                table_texts,
+                rows[row_index],
+                quantity_x,
+                division_bounds,
+                division,
+                category,
+            )
+            mapped[output_kind] = {
+                "x": category_text["x"],
+                "y": sum(rows[row_index]) / 2,
+                "種別": output_kind,
+                "単位": "",
+                "数量": quantity,
+            }
+
+    for output_kind in CATEGORY_TABLE_RIGHT_OUTPUT_KINDS:
         source_kind = output_kind.replace("(右)", "(左)")
         source = mapped[source_kind]
         mapped[output_kind] = {
@@ -1285,7 +1386,7 @@ def _build_symbol_quantity_table_group(table, table_texts):
     ]
     if missing:
         raise ExtractionError(
-            f"記号型土工表の転記項目が不足しています（{missing}）。"
+            f"種別型土工表の転記項目が不足しています（{missing}）。"
         )
 
     return [
@@ -1306,9 +1407,10 @@ def build_table_data_groups(all_texts, tables, table_regions):
             table,
             region,
         )
-        if table.get("format") == SYMBOL_TABLE_FORMAT:
-            group = _build_symbol_quantity_table_group(
+        if table.get("format") == CATEGORY_TABLE_FORMAT:
+            group = _build_category_quantity_table_group(
                 table,
+                region,
                 table_texts,
             )
         else:
@@ -1318,7 +1420,7 @@ def build_table_data_groups(all_texts, tables, table_regions):
                 and abs(text["y"] - table["y"]) <= TABLE_HEADER_Y_TOLERANCE
             ]
         if (
-            table.get("format") != SYMBOL_TABLE_FORMAT
+            table.get("format") != CATEGORY_TABLE_FORMAT
             and division_headers
         ):
             group = _build_hierarchical_table_group(
@@ -1326,7 +1428,7 @@ def build_table_data_groups(all_texts, tables, table_regions):
                 region,
                 table_texts,
             )
-        elif table.get("format") != SYMBOL_TABLE_FORMAT:
+        elif table.get("format") != CATEGORY_TABLE_FORMAT:
             group = _build_legacy_table_group(table_texts)
         groups.append(group)
 
@@ -1500,7 +1602,7 @@ def resolve_table_stations(tables, stations, center_markers):
     ]
 
 
-def _detect_symbol_table_alignments(
+def _detect_category_table_alignments(
     tables,
     table_regions,
     all_texts,
@@ -1519,7 +1621,7 @@ def _detect_symbol_table_alignments(
         ]
         if len(candidates) != 1:
             raise ExtractionError(
-                "記号型土工表の路線名を一意に特定できません。"
+                "種別型土工表の路線名を一意に特定できません。"
             )
         alignments.append(candidates[0]["text"])
     return alignments
@@ -1595,7 +1697,7 @@ def _minimum_cost_unique_assignment(origins, candidates):
     return assignments
 
 
-def _resolve_symbol_table_stations(tables, stations, alignments):
+def _resolve_category_table_stations(tables, stations, alignments):
     grouped_indexes = {}
     for index, alignment in enumerate(alignments):
         grouped_indexes.setdefault(alignment, []).append(index)
@@ -1606,7 +1708,7 @@ def _resolve_symbol_table_stations(tables, stations, alignments):
         candidates = [
             station for station in stations
             if (
-                int(station["text"]) >= SYMBOL_TABLE_MAINLINE_STATION_MIN
+                int(station["text"]) >= CATEGORY_TABLE_MAINLINE_STATION_MIN
             ) == mainline
         ]
         if not candidates:
@@ -1709,23 +1811,23 @@ def extract_output_record_sets(all_texts, all_lines):
         table.get("format", "unit")
         for table in tables
     }
-    if formats == {SYMBOL_TABLE_FORMAT}:
-        alignments = _detect_symbol_table_alignments(
+    if formats == {CATEGORY_TABLE_FORMAT}:
+        alignments = _detect_category_table_alignments(
             tables,
             table_regions,
             all_texts,
         )
-        table_stations = _resolve_symbol_table_stations(
+        table_stations = _resolve_category_table_stations(
             tables,
             stations,
             alignments,
         )
         record_sets = {}
         alignment_order = [
-            alignment for alignment in SYMBOL_TABLE_ALIGNMENT_ORDER
+            alignment for alignment in CATEGORY_TABLE_ALIGNMENT_ORDER
             if alignment in alignments
         ] + sorted(
-            set(alignments) - set(SYMBOL_TABLE_ALIGNMENT_ORDER)
+            set(alignments) - set(CATEGORY_TABLE_ALIGNMENT_ORDER)
         )
         for alignment in alignment_order:
             indexes = [
@@ -1739,7 +1841,7 @@ def extract_output_record_sets(all_texts, all_lines):
             )
         return record_sets
 
-    if SYMBOL_TABLE_FORMAT in formats:
+    if CATEGORY_TABLE_FORMAT in formats:
         raise ExtractionError(
             "異なる形式の土工表が同じDXFに混在しています。"
         )
@@ -2321,7 +2423,7 @@ def write_output_workbook(template_path, output_path, out_data):
             }
             for record in out_data
         )
-        is_symbol_quantity = bool(out_data) and all(
+        is_category_quantity = bool(out_data) and all(
             record.get("路線")
             and [data["種別"] for data in record["データ"]]
             == list(HIERARCHICAL_OUTPUT_KINDS)
@@ -2330,7 +2432,7 @@ def write_output_workbook(template_path, output_path, out_data):
         if (
             len(out_data) > VERIFIED_LEGACY_RECORD_COUNT
             or is_hierarchical
-            or is_symbol_quantity
+            or is_category_quantity
         ):
             _prepare_dynamic_workbook(wb, out_data)
 

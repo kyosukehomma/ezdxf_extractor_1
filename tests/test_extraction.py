@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import shutil
 import tempfile
 import unittest
@@ -43,7 +44,7 @@ MAINLINE_EXPECTED_DIGEST = (
     "7297e6e9d4664d47c0437e72a907576"
     "b65f7db0e35d691d8e5d6479ff4a10d74"
 )
-SYMBOL_TABLE_EXPECTED_DIGEST = (
+CATEGORY_TABLE_EXPECTED_DIGEST = (
     "81a228956d3a08c5001493d3e9ff5e79"
     "827d78f6fe2ae9de9216928dec00fbf9"
 )
@@ -74,16 +75,14 @@ class TableDetectionTests(unittest.TestCase):
         self.assertEqual(1, len(tables))
         self.assertEqual("D-MTR-TXT", tables[0]["layer"])
 
-    def test_detects_symbol_quantity_header_with_small_y_offsets(self):
+    def test_detects_category_quantity_header_without_symbol_column(self):
         x_positions = (
             0.0,
-            2.54,
-            6.54,
-            10.48,
-            13.12,
-            15.62,
-            19.45,
-            22.54,
+            4.0,
+            7.94,
+            13.08,
+            16.91,
+            20.00,
         )
         texts = [
             text_token(
@@ -93,15 +92,15 @@ class TableDetectionTests(unittest.TestCase):
                 "D-MTR-TXT",
             )
             for index, (word, x) in enumerate(
-                zip(app.SYMBOL_TABLE_HEADER_SEQUENCE, x_positions)
+                zip(app.CATEGORY_TABLE_HEADER_SEQUENCE, x_positions)
             )
         ]
 
         tables = app.detect_earthwork_tables(texts)
 
         self.assertEqual(1, len(tables))
-        self.assertEqual(app.SYMBOL_TABLE_FORMAT, tables[0]["format"])
-        self.assertEqual(app.SYMBOL_TABLE_LINE_LAYER, tables[0]["line_layer"])
+        self.assertEqual(app.CATEGORY_TABLE_FORMAT, tables[0]["format"])
+        self.assertEqual(app.CATEGORY_TABLE_LINE_LAYER, tables[0]["line_layer"])
 
     def test_center_marker_match_is_exact(self):
         texts = [
@@ -225,7 +224,7 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
         VERIFIED_OUTPUT_DIR / "01-01-03土工_05横断図283～306.xlsx"
     )
     problem_dxf = LOCAL_CASE_DIR / "05_本線横断図.dxf"
-    symbol_table_dxf = PROJECT_ROOT / "input" / "004_横断図240514.dxf"
+    category_table_dxf = PROJECT_ROOT / "input" / "004_横断図240514.dxf"
 
     def _first_good_table_texts(self):
         if not self.good_dxf.exists():
@@ -576,18 +575,18 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
             finally:
                 workbook.close()
 
-    def test_symbol_quantity_dxf_splits_five_alignments_and_blanks_right_slopes(self):
-        if not self.symbol_table_dxf.exists():
-            self.skipTest("ローカルの記号型検証用DXFがありません。")
+    def test_category_quantity_dxf_ignores_symbols_and_splits_five_alignments(self):
+        if not self.category_table_dxf.exists():
+            self.skipTest("ローカルの種別型検証用DXFがありません。")
 
-        doc = ezdxf.readfile(self.symbol_table_dxf)
+        doc = ezdxf.readfile(self.category_table_dxf)
         modelspace = doc.modelspace()
         texts = app.collect_all_texts(modelspace)
         lines = app.collect_all_lines(modelspace)
         tables = app.detect_earthwork_tables(texts)
         self.assertEqual(103, len(tables))
         self.assertEqual(
-            {app.SYMBOL_TABLE_FORMAT},
+            {app.CATEGORY_TABLE_FORMAT},
             {table["format"] for table in tables},
         )
 
@@ -624,6 +623,27 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
                 )
                 for alignment, records in record_sets.items()
             },
+        )
+
+        symbol_pattern = re.compile(
+            r"^(?:CA\d+|BA\d+(?:-\d+)?|CL\d+|BL\d+|"
+            r"W\d+(?:-\d+)?|L|A)$"
+        )
+        texts_with_scrambled_symbols = []
+        for index, text in enumerate(texts):
+            copied = dict(text)
+            if (
+                text["text"] == "記号"
+                or symbol_pattern.fullmatch(text["text"])
+            ):
+                copied["text"] = f"不定記号{index}"
+            texts_with_scrambled_symbols.append(copied)
+        self.assertEqual(
+            record_sets,
+            app.extract_output_record_sets(
+                texts_with_scrambled_symbols,
+                lines,
+            ),
         )
 
         for alignment, records in record_sets.items():
@@ -677,7 +697,7 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
                 separators=(",", ":"),
             ).encode()
         ).hexdigest()
-        self.assertEqual(SYMBOL_TABLE_EXPECTED_DIGEST, digest)
+        self.assertEqual(CATEGORY_TABLE_EXPECTED_DIGEST, digest)
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
@@ -686,8 +706,8 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
             input_directory.mkdir()
             template_directory.mkdir()
             shutil.copy2(
-                self.symbol_table_dxf,
-                input_directory / self.symbol_table_dxf.name,
+                self.category_table_dxf,
+                input_directory / self.category_table_dxf.name,
             )
             shutil.copy2(
                 PROJECT_ROOT / "template" / app.TEMPLATE_NAME,
@@ -702,7 +722,7 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
                 app.get_base_path = original_get_base_path
 
             self.assertEqual([], failures)
-            self.assertEqual([self.symbol_table_dxf.name], processed)
+            self.assertEqual([self.category_table_dxf.name], processed)
             output_directories = list(
                 (temporary_root / "output").glob("exec_*")
             )
@@ -775,7 +795,7 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
                     workbook.close()
 
             self.assertEqual(
-                [self.symbol_table_dxf.name],
+                [self.category_table_dxf.name],
                 [
                     path.name
                     for path in input_directory.glob("used_*/*.dxf")
