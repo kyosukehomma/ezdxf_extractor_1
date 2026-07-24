@@ -40,6 +40,24 @@ MERGE_Y_TOLERANCE =  1.0
 
 EARTHWORK_TEXT_LAYER_PREFIX = "D-MTR-TXT"
 EARTHWORK_HEADER_SEQUENCE = ("種別", "単位", "数量", "種別", "単位", "数量")
+SYMBOL_TABLE_HEADER_SEQUENCE = (
+    "記号",
+    "種別",
+    "区分",
+    "数量",
+    "記号",
+    "種別",
+    "区分",
+    "数量",
+)
+SYMBOL_TABLE_LINE_LAYER = "D-MTR-LINE"
+SYMBOL_TABLE_FORMAT = "symbol_quantity"
+SYMBOL_TABLE_HEADER_X_SPAN_MIN = 20.0
+SYMBOL_TABLE_HEADER_X_SPAN_MAX = 30.0
+SYMBOL_TABLE_SYMBOL_PAIR_X_MIN = 12.5
+SYMBOL_TABLE_SYMBOL_PAIR_X_MAX = 13.7
+SYMBOL_TABLE_SYMBOL_PAIR_Y_TOLERANCE = 0.2
+SYMBOL_TABLE_HEADER_Y_TOLERANCE = 0.3
 TABLE_HEADER_Y_TOLERANCE = 0.15
 TABLE_HEADER_X_GAP = 50.0
 MAX_DATA_GROUP_TO_TABLE_DISTANCE = 10.0
@@ -152,6 +170,34 @@ HIERARCHICAL_ALL_OUTPUT_KINDS = (
     HIERARCHICAL_OUTPUT_KINDS
     + HIERARCHICAL_WORK_OUTPUT_KINDS
 )
+SYMBOL_TABLE_SOURCE_SCHEMA = (
+    ("CA1", "オープン掘削"),
+    ("BA1-1", "路体盛土(W＜2.5m)"),
+    ("BA1-2", "路体盛土(2.5m≦W＜4.0m)"),
+    ("BA1-3", "路体盛土(4.0m≦W)"),
+    ("BA2-1", "路床盛土(W＜2.5m)"),
+    ("BA2-2", "路床盛土(2.5m≦W＜4.0m)"),
+    ("BA2-3", "路床盛土(4.0m≦W)"),
+    ("BA3", "路肩盛土"),
+    ("BA4-1", "路体外盛土(W＜2.5m)"),
+    ("BA4-2", "路体外盛土(2.5m≦W＜4.0m)"),
+    ("BA4-3", "路体外盛土(4.0m≦W)"),
+    ("BA5", "畦畔盛土"),
+    ("CL1", "切土法面整形(左)"),
+    ("BL1", "盛土法面整形(左)"),
+)
+SYMBOL_TABLE_RIGHT_OUTPUT_KINDS = (
+    "切土法面整形(右)",
+    "盛土法面整形(右)",
+)
+SYMBOL_TABLE_ALIGNMENT_ORDER = (
+    "本線",
+    "Aランプ",
+    "Bランプ",
+    "Cランプ",
+    "Dランプ",
+)
+SYMBOL_TABLE_MAINLINE_STATION_MIN = 100
 
 STATION_TEXT_LAYER = "D-BMK-HTXT"
 CENTER_MARKER_LAYER = "D-BMK"
@@ -439,8 +485,8 @@ def _split_by_x_gap(items, max_gap):
     return chunks
 
 
-def detect_earthwork_tables(all_texts):
-    """左右2組の「種別・単位・数量」から土工表のヘッダーを検出する。"""
+def _detect_unit_tables(all_texts):
+    """左右2組の「種別・単位・数量」ヘッダーを検出する。"""
     header_words = set(EARTHWORK_HEADER_SEQUENCE)
     header_texts = [
         t for t in all_texts
@@ -484,9 +530,86 @@ def detect_earthwork_tables(all_texts):
                 "x": sum(t["x"] for t in chunk) / len(chunk),
                 "y": sum(t["y"] for t in chunk) / len(chunk),
                 "layer": row_group["layer"],
+                "line_layer": row_group["layer"],
+                "format": "unit",
                 "headers": tuple(chunk),
             })
 
+    return tables
+
+
+def _detect_symbol_quantity_tables(all_texts):
+    """
+    左右2組の「記号・種別・区分・数量」ヘッダーを検出する。
+
+    この形式は同じ表のヘッダー間でもY座標に僅かな差があるため、
+    左右の「記号」の相対位置を起点に8項目を照合する。
+    """
+    header_words = set(SYMBOL_TABLE_HEADER_SEQUENCE)
+    symbol_headers = [
+        text for text in all_texts
+        if text.get("layer", "").startswith(EARTHWORK_TEXT_LAYER_PREFIX)
+        and text["text"] == "記号"
+    ]
+
+    tables = []
+    for left_symbol in symbol_headers:
+        right_symbols = [
+            text for text in symbol_headers
+            if text["layer"] == left_symbol["layer"]
+            and SYMBOL_TABLE_SYMBOL_PAIR_X_MIN
+            < text["x"] - left_symbol["x"]
+            < SYMBOL_TABLE_SYMBOL_PAIR_X_MAX
+            and abs(text["y"] - left_symbol["y"])
+            <= SYMBOL_TABLE_SYMBOL_PAIR_Y_TOLERANCE
+        ]
+        if len(right_symbols) != 1:
+            continue
+
+        right_symbol = right_symbols[0]
+        candidates = sorted(
+            [
+                text for text in all_texts
+                if text["layer"] == left_symbol["layer"]
+                and text["text"] in header_words
+                and left_symbol["x"] - SYMBOL_TABLE_SYMBOL_PAIR_Y_TOLERANCE
+                <= text["x"]
+                <= right_symbol["x"] + 10.0
+                and abs(text["y"] - left_symbol["y"])
+                <= SYMBOL_TABLE_HEADER_Y_TOLERANCE
+            ],
+            key=lambda text: text["x"],
+        )
+        ordered_words = tuple(text["text"] for text in candidates)
+        if ordered_words != SYMBOL_TABLE_HEADER_SEQUENCE:
+            continue
+
+        header_span = candidates[-1]["x"] - candidates[0]["x"]
+        if not (
+            SYMBOL_TABLE_HEADER_X_SPAN_MIN
+            <= header_span
+            <= SYMBOL_TABLE_HEADER_X_SPAN_MAX
+        ):
+            continue
+
+        tables.append({
+            "x": sum(text["x"] for text in candidates) / len(candidates),
+            "y": sum(text["y"] for text in candidates) / len(candidates),
+            "layer": left_symbol["layer"],
+            "line_layer": SYMBOL_TABLE_LINE_LAYER,
+            "format": SYMBOL_TABLE_FORMAT,
+            "headers": tuple(candidates),
+        })
+
+    return tables
+
+
+def detect_earthwork_tables(all_texts):
+    """対応する各ヘッダー形式から土工表を検出する。"""
+    tables = (
+        _detect_unit_tables(all_texts)
+        + _detect_symbol_quantity_tables(all_texts)
+    )
     tables.sort(key=lambda t: (-t["y"], t["x"]))
     return tables
 
@@ -558,15 +681,25 @@ def _connected_line_components(lines, tolerance):
 
 
 def detect_table_regions(tables, all_lines, all_texts):
-    """ヘッダーと同じレイヤーの罫線から、表ごとの抽出領域を作る。"""
+    """形式ごとの罫線レイヤーから、表ごとの抽出領域を作る。"""
     if not tables:
         raise ExtractionError("抽出領域を作成する土工表がありません。")
 
     assignments = [[] for _ in tables]
-    table_layers = {table["layer"] for table in tables}
+    table_layers = {
+        table.get("line_layer", table["layer"])
+        for table in tables
+    }
+    component_line_layers = {
+        table.get("line_layer", table["layer"])
+        for table in tables
+        if table.get("format") == SYMBOL_TABLE_FORMAT
+    }
 
     for line in all_lines:
         if line["layer"] not in table_layers:
+            continue
+        if line["layer"] in component_line_layers:
             continue
 
         dx = abs(line["end_x"] - line["start_x"])
@@ -576,7 +709,7 @@ def detect_table_regions(tables, all_lines, all_texts):
 
         candidate_indexes = [
             index for index, table in enumerate(tables)
-            if table["layer"] == line["layer"]
+            if table.get("line_layer", table["layer"]) == line["layer"]
         ]
         table_index = min(
             candidate_indexes,
@@ -589,6 +722,61 @@ def detect_table_regions(tables, all_lines, all_texts):
         ):
             raise ExtractionError("土工表から離れた罫線が同じレイヤーに存在します。")
         assignments[table_index].append(line)
+
+    for line_layer in component_line_layers:
+        layer_tables = [
+            (index, table)
+            for index, table in enumerate(tables)
+            if table.get("line_layer", table["layer"]) == line_layer
+        ]
+        layer_lines = [
+            line for line in all_lines
+            if line["layer"] == line_layer
+        ]
+        if not layer_lines:
+            raise ExtractionError("記号型土工表の罫線を検出できませんでした。")
+
+        for line in layer_lines:
+            dx = abs(line["end_x"] - line["start_x"])
+            dy = abs(line["end_y"] - line["start_y"])
+            if dx > LINE_AXIS_TOLERANCE and dy > LINE_AXIS_TOLERANCE:
+                raise ExtractionError(
+                    "記号型土工表レイヤーに斜めのLINEがあります。"
+                )
+
+        text_heights = sorted(
+            header["height"]
+            for _, table in layer_tables
+            for header in table["headers"]
+        )
+        text_height = text_heights[len(text_heights) // 2]
+        connection_tolerance = (
+            text_height * LINE_CONNECTION_TOLERANCE_FACTOR
+        )
+        components = _connected_line_components(
+            layer_lines,
+            connection_tolerance,
+        )
+        for component in components:
+            bounds = _lines_bounds(component)
+            matching_indexes = [
+                index for index, table in layer_tables
+                if all(
+                    _point_in_bounds(
+                        header["x"],
+                        header["y"],
+                        bounds,
+                        connection_tolerance,
+                    )
+                    for header in table["headers"]
+                )
+            ]
+            if len(matching_indexes) != 1:
+                raise ExtractionError(
+                    "記号型土工表の罫線をヘッダーへ一意に対応付け"
+                    "できません。"
+                )
+            assignments[matching_indexes[0]].extend(component)
 
     regions = []
     for table_index, table in enumerate(tables):
@@ -1023,6 +1211,89 @@ def _build_hierarchical_table_group(table, region, table_texts):
     ]
 
 
+def _symbol_table_quantity(symbol, table, table_texts):
+    symbols = [
+        text for text in table_texts
+        if text["text"] == symbol
+    ]
+    if len(symbols) != 1:
+        raise ExtractionError(
+            f"記号型土工表の記号「{symbol}」を一意に特定できません。"
+        )
+
+    symbol_text = symbols[0]
+    quantity_headers = sorted(
+        [
+            header for header in table["headers"]
+            if header["text"] == "数量"
+        ],
+        key=lambda header: header["x"],
+    )
+    if len(quantity_headers) != 2:
+        raise ExtractionError("記号型土工表の数量ヘッダーが不足しています。")
+
+    center_x = sum(header["x"] for header in table["headers"]) / len(
+        table["headers"]
+    )
+    quantity_x = quantity_headers[0 if symbol_text["x"] < center_x else 1]["x"]
+    candidates = [
+        text for text in table_texts
+        if abs(text["y"] - symbol_text["y"]) <= TOLERANCE_Y_ROW
+        and abs(text["x"] - quantity_x) <= 1.5
+        and _parse_table_quantity(text["text"]) is not None
+    ]
+    if len(candidates) != 1:
+        raise ExtractionError(
+            f"記号型土工表の記号「{symbol}」に対応する数量を"
+            "一意に特定できません。"
+        )
+
+    return symbol_text, _parse_table_quantity(candidates[0]["text"])
+
+
+def _build_symbol_quantity_table_group(table, table_texts):
+    """記号をキーに数量を読み、左右なしの法面整形は左へ割り当てる。"""
+    mapped = {}
+    for symbol, output_kind in SYMBOL_TABLE_SOURCE_SCHEMA:
+        source, quantity = _symbol_table_quantity(
+            symbol,
+            table,
+            table_texts,
+        )
+        mapped[output_kind] = {
+            "x": source["x"],
+            "y": source["y"],
+            "種別": output_kind,
+            "単位": "",
+            "数量": quantity,
+        }
+
+    for output_kind in SYMBOL_TABLE_RIGHT_OUTPUT_KINDS:
+        source_kind = output_kind.replace("(右)", "(左)")
+        source = mapped[source_kind]
+        mapped[output_kind] = {
+            "x": source["x"],
+            "y": source["y"],
+            "種別": output_kind,
+            "単位": "",
+            "数量": None,
+        }
+
+    missing = [
+        kind for kind in HIERARCHICAL_OUTPUT_KINDS
+        if kind not in mapped
+    ]
+    if missing:
+        raise ExtractionError(
+            f"記号型土工表の転記項目が不足しています（{missing}）。"
+        )
+
+    return [
+        mapped[kind]
+        for kind in HIERARCHICAL_OUTPUT_KINDS
+    ]
+
+
 def build_table_data_groups(all_texts, tables, table_regions):
     """各土工表の罫線領域内だけからExcel転記用データを構築する。"""
     if len(tables) != len(table_regions):
@@ -1035,18 +1306,27 @@ def build_table_data_groups(all_texts, tables, table_regions):
             table,
             region,
         )
-        division_headers = [
-            text for text in table_texts
-            if text["text"] == "区分"
-            and abs(text["y"] - table["y"]) <= TABLE_HEADER_Y_TOLERANCE
-        ]
-        if division_headers:
+        if table.get("format") == SYMBOL_TABLE_FORMAT:
+            group = _build_symbol_quantity_table_group(
+                table,
+                table_texts,
+            )
+        else:
+            division_headers = [
+                text for text in table_texts
+                if text["text"] == "区分"
+                and abs(text["y"] - table["y"]) <= TABLE_HEADER_Y_TOLERANCE
+            ]
+        if (
+            table.get("format") != SYMBOL_TABLE_FORMAT
+            and division_headers
+        ):
             group = _build_hierarchical_table_group(
                 table,
                 region,
                 table_texts,
             )
-        else:
+        elif table.get("format") != SYMBOL_TABLE_FORMAT:
             group = _build_legacy_table_group(table_texts)
         groups.append(group)
 
@@ -1220,8 +1500,198 @@ def resolve_table_stations(tables, stations, center_markers):
     ]
 
 
-def extract_output_records(all_texts, all_lines):
-    """DXFのTEXT・LINEから、Excel転記前のレコードを副作用なしで抽出する。"""
+def _detect_symbol_table_alignments(
+    tables,
+    table_regions,
+    all_texts,
+):
+    alignments = []
+    for table, region in zip(tables, table_regions):
+        main_bounds = region["main_bounds"]
+        candidates = [
+            text for text in all_texts
+            if text["layer"] == table["layer"]
+            and main_bounds["min_x"] - region["text_height"]
+            <= text["x"]
+            <= main_bounds["max_x"] + region["text_height"]
+            and main_bounds["max_y"] < text["y"]
+            <= main_bounds["max_y"] + region["text_height"] * 1.5
+        ]
+        if len(candidates) != 1:
+            raise ExtractionError(
+                "記号型土工表の路線名を一意に特定できません。"
+            )
+        alignments.append(candidates[0]["text"])
+    return alignments
+
+
+def _minimum_cost_unique_assignment(origins, candidates):
+    """矩形ハンガリアン法で各表へ異なる測点を最小距離で割り当てる。"""
+    origin_count = len(origins)
+    candidate_count = len(candidates)
+    if origin_count > candidate_count:
+        raise ExtractionError("土工表より測点候補が少ないため対応付けできません。")
+
+    row_potentials = [0.0] * (origin_count + 1)
+    column_potentials = [0.0] * (candidate_count + 1)
+    column_rows = [0] * (candidate_count + 1)
+    previous_columns = [0] * (candidate_count + 1)
+
+    for row in range(1, origin_count + 1):
+        column_rows[0] = row
+        current_column = 0
+        minimum_values = [float("inf")] * (candidate_count + 1)
+        used = [False] * (candidate_count + 1)
+
+        while True:
+            used[current_column] = True
+            current_row = column_rows[current_column]
+            delta = float("inf")
+            next_column = 0
+            for column in range(1, candidate_count + 1):
+                if used[column]:
+                    continue
+                reduced_cost = (
+                    _distance(
+                        origins[current_row - 1],
+                        candidates[column - 1],
+                    )
+                    - row_potentials[current_row]
+                    - column_potentials[column]
+                )
+                if reduced_cost < minimum_values[column]:
+                    minimum_values[column] = reduced_cost
+                    previous_columns[column] = current_column
+                if minimum_values[column] < delta:
+                    delta = minimum_values[column]
+                    next_column = column
+
+            for column in range(candidate_count + 1):
+                if used[column]:
+                    row_potentials[column_rows[column]] += delta
+                    column_potentials[column] -= delta
+                else:
+                    minimum_values[column] -= delta
+
+            current_column = next_column
+            if column_rows[current_column] == 0:
+                break
+
+        while True:
+            previous_column = previous_columns[current_column]
+            column_rows[current_column] = column_rows[previous_column]
+            current_column = previous_column
+            if current_column == 0:
+                break
+
+    assignments = [None] * origin_count
+    for column in range(1, candidate_count + 1):
+        row = column_rows[column]
+        if row != 0:
+            assignments[row - 1] = column - 1
+
+    if any(index is None for index in assignments):
+        raise ExtractionError("土工表と測点の最小距離対応付けに失敗しました。")
+    return assignments
+
+
+def _resolve_symbol_table_stations(tables, stations, alignments):
+    grouped_indexes = {}
+    for index, alignment in enumerate(alignments):
+        grouped_indexes.setdefault(alignment, []).append(index)
+
+    resolved = [None] * len(tables)
+    for alignment, table_indexes in grouped_indexes.items():
+        mainline = alignment == "本線"
+        candidates = [
+            station for station in stations
+            if (
+                int(station["text"]) >= SYMBOL_TABLE_MAINLINE_STATION_MIN
+            ) == mainline
+        ]
+        if not candidates:
+            raise ExtractionError(
+                f"路線「{alignment}」の測点候補がありません。"
+            )
+
+        alignment_tables = [
+            tables[index]
+            for index in table_indexes
+        ]
+        candidate_indexes = _minimum_cost_unique_assignment(
+            alignment_tables,
+            candidates,
+        )
+        alignment_stations = [
+            candidates[index]
+            for index in candidate_indexes
+        ]
+
+        for table, station in zip(
+            alignment_tables,
+            alignment_stations,
+        ):
+            if (
+                _distance(table, station) > MAX_TABLE_TO_STATION_DISTANCE
+                or abs(
+                    table["y"]
+                    - station.get("anchor_y", station["y"])
+                ) > MAX_TABLE_TO_STATION_Y_DISTANCE
+            ):
+                raise ExtractionError(
+                    f"路線「{alignment}」の土工表と測点の距離が"
+                    "安全上限を超えています。"
+                )
+
+        ordered_numbers = sorted(
+            int(station["text"])
+            for station in alignment_stations
+        )
+        expected_numbers = list(
+            range(ordered_numbers[0], ordered_numbers[-1] + 1)
+        )
+        if ordered_numbers != expected_numbers:
+            raise ExtractionError(
+                f"路線「{alignment}」の対応測点が連続していません。"
+            )
+
+        for table_index, station in zip(
+            table_indexes,
+            alignment_stations,
+        ):
+            resolved[table_index] = station
+
+    return resolved
+
+
+def _records_for_tables(
+    table_stations,
+    table_data_groups,
+    alignments=None,
+):
+    out_data = [
+        {
+            "測点": Decimal(station["text"]),
+            "追加距離": station["plus"],
+            "データ": data_group,
+            **(
+                {"路線": alignment}
+                if alignment is not None
+                else {}
+            ),
+        }
+        for station, data_group, alignment in zip(
+            table_stations,
+            table_data_groups,
+            alignments or [None] * len(table_stations),
+        )
+    ]
+    out_data.sort(key=sort_key)
+    return out_data
+
+
+def extract_output_record_sets(all_texts, all_lines):
+    """DXFから、同じ測点系列でExcel化できるレコード群を抽出する。"""
     tables = detect_earthwork_tables(all_texts)
     table_regions = detect_table_regions(
         tables,
@@ -1233,22 +1703,73 @@ def extract_output_records(all_texts, all_lines):
         tables,
         table_regions,
     )
-    table_data_groups = assign_data_groups_to_tables(tables, data_groups)
 
     stations = extract_no_texts(all_texts)
-    center_markers = extract_center_markers(all_texts)
-    table_stations = resolve_table_stations(tables, stations, center_markers)
+    formats = {
+        table.get("format", "unit")
+        for table in tables
+    }
+    if formats == {SYMBOL_TABLE_FORMAT}:
+        alignments = _detect_symbol_table_alignments(
+            tables,
+            table_regions,
+            all_texts,
+        )
+        table_stations = _resolve_symbol_table_stations(
+            tables,
+            stations,
+            alignments,
+        )
+        record_sets = {}
+        alignment_order = [
+            alignment for alignment in SYMBOL_TABLE_ALIGNMENT_ORDER
+            if alignment in alignments
+        ] + sorted(
+            set(alignments) - set(SYMBOL_TABLE_ALIGNMENT_ORDER)
+        )
+        for alignment in alignment_order:
+            indexes = [
+                index for index, value in enumerate(alignments)
+                if value == alignment
+            ]
+            record_sets[alignment] = _records_for_tables(
+                [table_stations[index] for index in indexes],
+                [data_groups[index] for index in indexes],
+                [alignment] * len(indexes),
+            )
+        return record_sets
 
-    out_data = [
-        {
-            "測点": Decimal(station["text"]),
-            "追加距離": station["plus"],
-            "データ": data_group,
-        }
-        for station, data_group in zip(table_stations, table_data_groups)
+    if SYMBOL_TABLE_FORMAT in formats:
+        raise ExtractionError(
+            "異なる形式の土工表が同じDXFに混在しています。"
+        )
+
+    table_data_groups = assign_data_groups_to_tables(tables, data_groups)
+    center_markers = extract_center_markers(all_texts)
+    table_stations = resolve_table_stations(
+        tables,
+        stations,
+        center_markers,
+    )
+    return {
+        None: _records_for_tables(
+            table_stations,
+            table_data_groups,
+        )
+    }
+
+
+def extract_output_records(all_texts, all_lines):
+    """DXFのTEXT・LINEから、Excel転記前の全レコードを抽出する。"""
+    record_sets = extract_output_record_sets(
+        all_texts,
+        all_lines,
+    )
+    return [
+        record
+        for records in record_sets.values()
+        for record in records
     ]
-    out_data.sort(key=sort_key)
-    return out_data
 
 
 # ==================================================
@@ -1532,6 +2053,20 @@ def _populate_work_earthwork_sheet(ws, out_data, layout):
                 "埋戻(C)": "-",
                 "埋戻(D)": quantities["埋戻"],
             }
+        elif not (
+            {
+                "床掘",
+                "埋戻",
+                "埋戻(C)",
+                "埋戻(D)",
+            }
+            & quantities.keys()
+        ):
+            work_quantities = {
+                "床掘": None,
+                "埋戻(C)": None,
+                "埋戻(D)": None,
+            }
         else:
             raise ExtractionError(
                 "作業土工の床掘・埋戻数量を特定できませんでした。"
@@ -1786,9 +2321,16 @@ def write_output_workbook(template_path, output_path, out_data):
             }
             for record in out_data
         )
+        is_symbol_quantity = bool(out_data) and all(
+            record.get("路線")
+            and [data["種別"] for data in record["データ"]]
+            == list(HIERARCHICAL_OUTPUT_KINDS)
+            for record in out_data
+        )
         if (
             len(out_data) > VERIFIED_LEGACY_RECORD_COUNT
             or is_hierarchical
+            or is_symbol_quantity
         ):
             _prepare_dynamic_workbook(wb, out_data)
 
@@ -1838,22 +2380,31 @@ def proc(dxf_files):
             modelspace = doc.modelspace()
             all_texts = collect_all_texts(modelspace)
             all_lines = collect_all_lines(modelspace)
-            out_data = extract_output_records(all_texts, all_lines)
+            record_sets = extract_output_record_sets(
+                all_texts,
+                all_lines,
+            )
 
             name = (
                 TEMPLATE_BASE
                 + "_"
                 + os.path.splitext(os.path.basename(dxf_file))[0]
             )
-            output_path = os.path.join(
-                output_subfolder,
-                name + ".xlsx",
-            )
-            write_output_workbook(
-                template_path,
-                output_path,
-                out_data,
-            )
+            for alignment, out_data in record_sets.items():
+                alignment_suffix = (
+                    ""
+                    if alignment is None
+                    else "_" + alignment
+                )
+                output_path = os.path.join(
+                    output_subfolder,
+                    name + alignment_suffix + ".xlsx",
+                )
+                write_output_workbook(
+                    template_path,
+                    output_path,
+                    out_data,
+                )
             shutil.move(dxf_file, input_subfolder)
         except Exception as exc:
             failures.append(f"{os.path.basename(dxf_file)}: {exc}")

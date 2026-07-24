@@ -43,6 +43,10 @@ MAINLINE_EXPECTED_DIGEST = (
     "7297e6e9d4664d47c0437e72a907576"
     "b65f7db0e35d691d8e5d6479ff4a10d74"
 )
+SYMBOL_TABLE_EXPECTED_DIGEST = (
+    "81a228956d3a08c5001493d3e9ff5e79"
+    "827d78f6fe2ae9de9216928dec00fbf9"
+)
 
 
 def text_token(text, x, y, layer, height=0.5):
@@ -69,6 +73,35 @@ class TableDetectionTests(unittest.TestCase):
 
         self.assertEqual(1, len(tables))
         self.assertEqual("D-MTR-TXT", tables[0]["layer"])
+
+    def test_detects_symbol_quantity_header_with_small_y_offsets(self):
+        x_positions = (
+            0.0,
+            2.54,
+            6.54,
+            10.48,
+            13.12,
+            15.62,
+            19.45,
+            22.54,
+        )
+        texts = [
+            text_token(
+                word,
+                x,
+                100.0 + (0.03 if index % 2 else 0.0),
+                "D-MTR-TXT",
+            )
+            for index, (word, x) in enumerate(
+                zip(app.SYMBOL_TABLE_HEADER_SEQUENCE, x_positions)
+            )
+        ]
+
+        tables = app.detect_earthwork_tables(texts)
+
+        self.assertEqual(1, len(tables))
+        self.assertEqual(app.SYMBOL_TABLE_FORMAT, tables[0]["format"])
+        self.assertEqual(app.SYMBOL_TABLE_LINE_LAYER, tables[0]["line_layer"])
 
     def test_center_marker_match_is_exact(self):
         texts = [
@@ -192,6 +225,7 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
         VERIFIED_OUTPUT_DIR / "01-01-03土工_05横断図283～306.xlsx"
     )
     problem_dxf = LOCAL_CASE_DIR / "05_本線横断図.dxf"
+    symbol_table_dxf = PROJECT_ROOT / "input" / "004_横断図240514.dxf"
 
     def _first_good_table_texts(self):
         if not self.good_dxf.exists():
@@ -541,6 +575,212 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
                 )
             finally:
                 workbook.close()
+
+    def test_symbol_quantity_dxf_splits_five_alignments_and_blanks_right_slopes(self):
+        if not self.symbol_table_dxf.exists():
+            self.skipTest("ローカルの記号型検証用DXFがありません。")
+
+        doc = ezdxf.readfile(self.symbol_table_dxf)
+        modelspace = doc.modelspace()
+        texts = app.collect_all_texts(modelspace)
+        lines = app.collect_all_lines(modelspace)
+        tables = app.detect_earthwork_tables(texts)
+        self.assertEqual(103, len(tables))
+        self.assertEqual(
+            {app.SYMBOL_TABLE_FORMAT},
+            {table["format"] for table in tables},
+        )
+
+        regions = app.detect_table_regions(tables, lines, texts)
+        self.assertEqual({27}, {region["line_count"] for region in regions})
+        self.assertEqual({0}, {region["attached_count"] for region in regions})
+
+        record_sets = app.extract_output_record_sets(texts, lines)
+        self.assertEqual(
+            {
+                "本線": 52,
+                "Aランプ": 13,
+                "Bランプ": 12,
+                "Cランプ": 13,
+                "Dランプ": 13,
+            },
+            {
+                alignment: len(records)
+                for alignment, records in record_sets.items()
+            },
+        )
+        self.assertEqual(
+            {
+                "本線": (Decimal("214"), Decimal("265")),
+                "Aランプ": (Decimal("0"), Decimal("12")),
+                "Bランプ": (Decimal("1"), Decimal("12")),
+                "Cランプ": (Decimal("0"), Decimal("12")),
+                "Dランプ": (Decimal("1"), Decimal("13")),
+            },
+            {
+                alignment: (
+                    records[0]["測点"],
+                    records[-1]["測点"],
+                )
+                for alignment, records in record_sets.items()
+            },
+        )
+
+        for alignment, records in record_sets.items():
+            self.assertTrue(
+                all(record["路線"] == alignment for record in records)
+            )
+            self.assertTrue(
+                all(
+                    [data["種別"] for data in record["データ"]]
+                    == list(app.HIERARCHICAL_OUTPUT_KINDS)
+                    for record in records
+                )
+            )
+            for record in records:
+                quantities = {
+                    data["種別"]: data["数量"]
+                    for data in record["データ"]
+                }
+                self.assertIsNone(quantities["切土法面整形(右)"])
+                self.assertIsNone(quantities["盛土法面整形(右)"])
+
+        digest_payload = {
+            alignment: [
+                [
+                    str(record["測点"]),
+                    (
+                        ""
+                        if record["追加距離"] is None
+                        else str(record["追加距離"])
+                    ),
+                    [
+                        [
+                            data["種別"],
+                            (
+                                ""
+                                if data["数量"] is None
+                                else str(data["数量"])
+                            ),
+                        ]
+                        for data in record["データ"]
+                    ],
+                ]
+                for record in records
+            ]
+            for alignment, records in record_sets.items()
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                digest_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        self.assertEqual(SYMBOL_TABLE_EXPECTED_DIGEST, digest)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            input_directory = temporary_root / "input"
+            template_directory = temporary_root / "template"
+            input_directory.mkdir()
+            template_directory.mkdir()
+            shutil.copy2(
+                self.symbol_table_dxf,
+                input_directory / self.symbol_table_dxf.name,
+            )
+            shutil.copy2(
+                PROJECT_ROOT / "template" / app.TEMPLATE_NAME,
+                template_directory / app.TEMPLATE_NAME,
+            )
+
+            original_get_base_path = app.get_base_path
+            app.get_base_path = lambda: str(temporary_root)
+            try:
+                processed, failures = app.proc([])
+            finally:
+                app.get_base_path = original_get_base_path
+
+            self.assertEqual([], failures)
+            self.assertEqual([self.symbol_table_dxf.name], processed)
+            output_directories = list(
+                (temporary_root / "output").glob("exec_*")
+            )
+            self.assertEqual(1, len(output_directories))
+            output_paths = {
+                path.stem.rsplit("_", 1)[-1]: path
+                for path in output_directories[0].glob("*.xlsx")
+            }
+            self.assertEqual(set(record_sets), set(output_paths))
+
+            for alignment, records in record_sets.items():
+                workbook = load_workbook(
+                    output_paths[alignment],
+                    data_only=False,
+                )
+                try:
+                    input_sheet = workbook[app.SHEET_NAME]
+                    self.assertEqual(20, input_sheet["E4"].value)
+                    for index, record in enumerate(records, start=app.ROW_START):
+                        quantities = {
+                            data["種別"]: data["数量"]
+                            for data in record["データ"]
+                        }
+                        cut_left = input_sheet.cell(index, 25).value
+                        fill_left = input_sheet.cell(index, 27).value
+                        if isinstance(
+                            quantities["切土法面整形(左)"],
+                            Decimal,
+                        ):
+                            cut_left = Decimal(str(cut_left))
+                        if isinstance(
+                            quantities["盛土法面整形(左)"],
+                            Decimal,
+                        ):
+                            fill_left = Decimal(str(fill_left))
+                        self.assertEqual(
+                            quantities["切土法面整形(左)"],
+                            cut_left,
+                        )
+                        self.assertIsNone(input_sheet.cell(index, 26).value)
+                        self.assertEqual(
+                            quantities["盛土法面整形(左)"],
+                            fill_left,
+                        )
+                        self.assertIsNone(input_sheet.cell(index, 28).value)
+
+                    ref_formulas = [
+                        cell.value
+                        for sheet in workbook.worksheets
+                        for row in sheet.iter_rows()
+                        for cell in row
+                        if (
+                            isinstance(cell.value, str)
+                            and cell.value.startswith("=")
+                            and "#REF!" in cell.value
+                        )
+                    ]
+                    self.assertEqual([], ref_formulas)
+
+                    if alignment == "本線":
+                        work_sheet = workbook["作業土工1"]
+                        self.assertTrue(
+                            all(
+                                work_sheet.cell(row, column).value is None
+                                for row in range(6, 6 + len(records))
+                                for column in (7, 10, 13)
+                            )
+                        )
+                finally:
+                    workbook.close()
+
+            self.assertEqual(
+                [self.symbol_table_dxf.name],
+                [
+                    path.name
+                    for path in input_directory.glob("used_*/*.dxf")
+                ],
+            )
 
     def test_proc_creates_both_workbooks_and_archives_both_dxf_files(self):
         if (
