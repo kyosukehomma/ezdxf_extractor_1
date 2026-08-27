@@ -203,18 +203,12 @@ CATEGORY_TABLE_RIGHT_OUTPUT_KINDS = (
     "切土法面整形(右)",
     "盛土法面整形(右)",
 )
-CATEGORY_TABLE_ALIGNMENT_ORDER = (
-    "本線",
-    "Aランプ",
-    "Bランプ",
-    "Cランプ",
-    "Dランプ",
-)
 CATEGORY_TABLE_MAINLINE_STATION_MIN = 100
 
 STATION_TEXT_LAYER = "D-BMK-HTXT"
 CENTER_MARKER_LAYER = "D-BMK"
 CENTER_MARKER_TEXTS = {"CL", "C.L", "C.L."}
+ROUTE_NAME_PATTERN = re.compile(r"^(?:本線|.+ランプ)$")
 MAX_TABLE_TO_CENTER_DISTANCE = 75.0
 MAX_TABLE_TO_CENTER_Y_DISTANCE = 15.0
 MAX_CENTER_TO_STATION_DISTANCE = 15.0
@@ -1602,29 +1596,56 @@ def resolve_table_stations(tables, stations, center_markers):
     ]
 
 
-def _detect_category_table_alignments(
+def _select_mainline_tables(
     tables,
     table_regions,
     all_texts,
 ):
-    alignments = []
+    """明示された路線名がある場合は、本線の土工表だけを残す。"""
+    route_names = []
     for table, region in zip(tables, table_regions):
         main_bounds = region["main_bounds"]
         candidates = [
             text for text in all_texts
             if text["layer"] == table["layer"]
+            and ROUTE_NAME_PATTERN.fullmatch(text["text"])
             and main_bounds["min_x"] - region["text_height"]
             <= text["x"]
             <= main_bounds["max_x"] + region["text_height"]
             and main_bounds["max_y"] < text["y"]
-            <= main_bounds["max_y"] + region["text_height"] * 1.5
+            <= main_bounds["max_y"] + region["text_height"] * 2
         ]
-        if len(candidates) != 1:
+        if len(candidates) > 1:
             raise ExtractionError(
-                "種別型土工表の路線名を一意に特定できません。"
+                "土工表の路線名を一意に特定できません。"
             )
-        alignments.append(candidates[0]["text"])
-    return alignments
+        route_names.append(
+            None if not candidates else candidates[0]["text"]
+        )
+
+    explicit_route_count = sum(
+        route_name is not None
+        for route_name in route_names
+    )
+    if explicit_route_count == 0:
+        return tables, table_regions, ["本線"] * len(tables)
+    if explicit_route_count != len(tables):
+        raise ExtractionError(
+            "路線名のある土工表とない土工表が混在しています。"
+        )
+
+    mainline_indexes = [
+        index for index, route_name in enumerate(route_names)
+        if route_name == "本線"
+    ]
+    if not mainline_indexes:
+        raise ExtractionError("本線の土工表を検出できませんでした。")
+
+    return (
+        [tables[index] for index in mainline_indexes],
+        [table_regions[index] for index in mainline_indexes],
+        ["本線"] * len(mainline_indexes),
+    )
 
 
 def _minimum_cost_unique_assignment(origins, candidates):
@@ -1800,6 +1821,11 @@ def extract_output_record_sets(all_texts, all_lines):
         all_lines,
         all_texts,
     )
+    tables, table_regions, alignments = _select_mainline_tables(
+        tables,
+        table_regions,
+        all_texts,
+    )
     data_groups = build_table_data_groups(
         all_texts,
         tables,
@@ -1812,34 +1838,18 @@ def extract_output_record_sets(all_texts, all_lines):
         for table in tables
     }
     if formats == {CATEGORY_TABLE_FORMAT}:
-        alignments = _detect_category_table_alignments(
-            tables,
-            table_regions,
-            all_texts,
-        )
         table_stations = _resolve_category_table_stations(
             tables,
             stations,
             alignments,
         )
-        record_sets = {}
-        alignment_order = [
-            alignment for alignment in CATEGORY_TABLE_ALIGNMENT_ORDER
-            if alignment in alignments
-        ] + sorted(
-            set(alignments) - set(CATEGORY_TABLE_ALIGNMENT_ORDER)
-        )
-        for alignment in alignment_order:
-            indexes = [
-                index for index, value in enumerate(alignments)
-                if value == alignment
-            ]
-            record_sets[alignment] = _records_for_tables(
-                [table_stations[index] for index in indexes],
-                [data_groups[index] for index in indexes],
-                [alignment] * len(indexes),
+        return {
+            "本線": _records_for_tables(
+                table_stations,
+                data_groups,
+                alignments,
             )
-        return record_sets
+        }
 
     if CATEGORY_TABLE_FORMAT in formats:
         raise ExtractionError(

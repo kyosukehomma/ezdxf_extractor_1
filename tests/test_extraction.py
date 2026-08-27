@@ -45,8 +45,8 @@ MAINLINE_EXPECTED_DIGEST = (
     "b65f7db0e35d691d8e5d6479ff4a10d74"
 )
 CATEGORY_TABLE_EXPECTED_DIGEST = (
-    "81a228956d3a08c5001493d3e9ff5e79"
-    "827d78f6fe2ae9de9216928dec00fbf9"
+    "cd2f1871d60167fa4cf031203d0274b0"
+    "1b2c5dc4c3fee05009eebcdc336e6ad2"
 )
 
 
@@ -115,6 +115,112 @@ class TableDetectionTests(unittest.TestCase):
         markers = app.extract_center_markers(texts)
 
         self.assertEqual(["CL", "C.L."], [marker["text"] for marker in markers])
+
+    def test_selects_only_explicit_mainline_tables(self):
+        tables = [
+            {"id": route, "layer": "D-MTR-TXT"}
+            for route in ("本線", "Bランプ", "Cランプ")
+        ]
+        regions = [
+            {
+                "main_bounds": {
+                    "min_x": index * 100.0,
+                    "max_x": index * 100.0 + 20.0,
+                    "min_y": 0.0,
+                    "max_y": 10.0,
+                },
+                "text_height": 1.0,
+            }
+            for index in range(3)
+        ]
+        texts = [
+            text_token(
+                route,
+                index * 100.0 + 5.0,
+                11.0,
+                "D-MTR-TXT",
+                height=1.0,
+            )
+            for index, route in enumerate(
+                ("本線", "Bランプ", "Cランプ")
+            )
+        ]
+
+        selected, selected_regions, alignments = (
+            app._select_mainline_tables(
+                tables,
+                regions,
+                texts,
+            )
+        )
+
+        self.assertEqual(["本線"], [table["id"] for table in selected])
+        self.assertEqual([regions[0]], selected_regions)
+        self.assertEqual(["本線"], alignments)
+
+    def test_treats_all_unlabelled_tables_as_mainline(self):
+        tables = [
+            {"id": index, "layer": "D-MTR-TXT"}
+            for index in range(2)
+        ]
+        regions = [
+            {
+                "main_bounds": {
+                    "min_x": index * 100.0,
+                    "max_x": index * 100.0 + 20.0,
+                    "min_y": 0.0,
+                    "max_y": 10.0,
+                },
+                "text_height": 1.0,
+            }
+            for index in range(2)
+        ]
+
+        selected, selected_regions, alignments = (
+            app._select_mainline_tables(
+                tables,
+                regions,
+                [],
+            )
+        )
+
+        self.assertEqual(tables, selected)
+        self.assertEqual(regions, selected_regions)
+        self.assertEqual(["本線", "本線"], alignments)
+
+    def test_rejects_mixed_labelled_and_unlabelled_tables(self):
+        tables = [
+            {"id": index, "layer": "D-MTR-TXT"}
+            for index in range(2)
+        ]
+        regions = [
+            {
+                "main_bounds": {
+                    "min_x": index * 100.0,
+                    "max_x": index * 100.0 + 20.0,
+                    "min_y": 0.0,
+                    "max_y": 10.0,
+                },
+                "text_height": 1.0,
+            }
+            for index in range(2)
+        ]
+        texts = [
+            text_token(
+                "本線",
+                5.0,
+                11.0,
+                "D-MTR-TXT",
+                height=1.0,
+            )
+        ]
+
+        with self.assertRaisesRegex(app.ExtractionError, "混在"):
+            app._select_mainline_tables(
+                tables,
+                regions,
+                texts,
+            )
 
     def test_rejects_data_group_far_from_its_only_table(self):
         tables = [{"x": 0.0, "y": 0.0}]
@@ -575,7 +681,7 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
             finally:
                 workbook.close()
 
-    def test_category_quantity_dxf_ignores_symbols_and_splits_five_alignments(self):
+    def test_category_quantity_dxf_ignores_symbols_and_outputs_only_mainline(self):
         if not self.category_table_dxf.exists():
             self.skipTest("ローカルの種別型検証用DXFがありません。")
 
@@ -598,10 +704,6 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
         self.assertEqual(
             {
                 "本線": 52,
-                "Aランプ": 13,
-                "Bランプ": 12,
-                "Cランプ": 13,
-                "Dランプ": 13,
             },
             {
                 alignment: len(records)
@@ -611,10 +713,6 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
         self.assertEqual(
             {
                 "本線": (Decimal("214"), Decimal("265")),
-                "Aランプ": (Decimal("0"), Decimal("12")),
-                "Bランプ": (Decimal("1"), Decimal("12")),
-                "Cランプ": (Decimal("0"), Decimal("12")),
-                "Dランプ": (Decimal("1"), Decimal("13")),
             },
             {
                 alignment: (
