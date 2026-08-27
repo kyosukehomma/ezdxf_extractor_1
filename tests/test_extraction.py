@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 import ezdxf
 from openpyxl import load_workbook
@@ -39,6 +40,11 @@ MAINLINE_WORK_EXPECTED_STATS = {
     "床掘": (55, Decimal("125.7"), 22),
     "埋戻(C)": (11, Decimal("34.9"), 66),
     "埋戻(D)": (46, Decimal("45.5"), 31),
+}
+LEGACY_WORK_EXPECTED_STATS = {
+    "床掘": (25, Decimal("76.7"), 0),
+    "埋戻(C)": (0, Decimal("0"), 25),
+    "埋戻(D)": (25, Decimal("44.9"), 0),
 }
 MAINLINE_EXPECTED_DIGEST = (
     "7297e6e9d4664d47c0437e72a907576"
@@ -222,6 +228,64 @@ class TableDetectionTests(unittest.TestCase):
                 texts,
             )
 
+    def test_resolves_all_route_tables_before_discarding_ramps(self):
+        tables = [
+            {"id": "mainline", "x": 0.0, "y": 0.0},
+            {"id": "ramp", "x": 100.0, "y": 0.0},
+        ]
+        regions = [{"id": "mainline"}, {"id": "ramp"}]
+        data_groups = [
+            [{"x": 0.0, "y": 0.0, "種別": "mainline"}],
+            [{"x": 100.0, "y": 0.0, "種別": "ramp"}],
+        ]
+        stations = [
+            {
+                "text": "1",
+                "plus": None,
+                "x": 0.0,
+                "y": 0.0,
+                "anchor_y": 0.0,
+            },
+            {
+                "text": "2",
+                "plus": None,
+                "x": 100.0,
+                "y": 0.0,
+                "anchor_y": 0.0,
+            },
+        ]
+
+        with (
+            patch.object(
+                app,
+                "detect_earthwork_tables",
+                return_value=tables,
+            ),
+            patch.object(
+                app,
+                "detect_table_regions",
+                return_value=regions,
+            ),
+            patch.object(
+                app,
+                "_detect_table_route_names",
+                return_value=["本線", "Bランプ"],
+            ),
+            patch.object(
+                app,
+                "build_table_data_groups",
+                return_value=data_groups,
+            ),
+            patch.object(app, "extract_no_texts", return_value=stations),
+            patch.object(app, "extract_center_markers", return_value=[]),
+        ):
+            record_sets = app.extract_output_record_sets([], [])
+
+        self.assertEqual({None}, set(record_sets))
+        self.assertEqual(1, len(record_sets[None]))
+        self.assertEqual(Decimal("1"), record_sets[None][0]["測点"])
+        self.assertEqual("mainline", record_sets[None][0]["データ"][0]["種別"])
+
     def test_rejects_data_group_far_from_its_only_table(self):
         tables = [{"x": 0.0, "y": 0.0}]
         data_groups = [[{"x": 100.0, "y": 0.0}]]
@@ -377,6 +441,116 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
         with self.assertRaisesRegex(app.ExtractionError, "数値化"):
             app._build_legacy_table_group(damaged_texts)
 
+    def test_input_layout_migration_is_idempotent(self):
+        if not self.verified_workbook.exists():
+            self.skipTest("旧配置の確認済みExcelがありません。")
+
+        workbook = load_workbook(self.verified_workbook, data_only=False)
+        try:
+            sheet = workbook[app.SHEET_NAME]
+            self.assertEqual(34, sheet.max_column)
+
+            app._prepare_input_sheet_layout(sheet)
+            self.assertEqual(35, sheet.max_column)
+            self.assertEqual(
+                list(app.WORK_OUTPUT_KINDS),
+                [sheet[f"{column}2"].value for column in ("AC", "AD", "AE")],
+            )
+
+            app._prepare_input_sheet_layout(sheet)
+            self.assertEqual(35, sheet.max_column)
+
+            with tempfile.TemporaryDirectory() as temporary_directory:
+                migrated = Path(temporary_directory) / "migrated.xlsx"
+                workbook.save(migrated)
+                reloaded = load_workbook(migrated, data_only=False)
+                try:
+                    reloaded_sheet = reloaded[app.SHEET_NAME]
+                    self.assertEqual(35, reloaded_sheet.max_column)
+                    for column in ("AC", "AD", "AE"):
+                        self.assertFalse(
+                            reloaded_sheet.column_dimensions[column].hidden
+                        )
+                        self.assertEqual(
+                            reloaded_sheet.column_dimensions["AB"].width,
+                            reloaded_sheet.column_dimensions[column].width,
+                        )
+                        for row in range(2, 6):
+                            self.assertEqual(
+                                reloaded_sheet[f"AB{row}"].style_id,
+                                reloaded_sheet[f"{column}{row}"].style_id,
+                            )
+                    app._prepare_input_sheet_layout(reloaded_sheet)
+                    self.assertEqual(35, reloaded_sheet.max_column)
+                finally:
+                    reloaded.close()
+        finally:
+            workbook.close()
+
+    def test_short_output_clears_unused_template_detail_rows(self):
+        template = PROJECT_ROOT / "template" / app.TEMPLATE_NAME
+        if not template.exists():
+            self.skipTest("Excelテンプレートがありません。")
+
+        records = [
+            {
+                "測点": Decimal("1"),
+                "追加距離": None,
+                "データ": [],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "short.xlsx"
+            app.write_output_workbook(template, output, records)
+            workbook = load_workbook(output, data_only=False)
+            try:
+                work_sheet = workbook["作業土工1"]
+                self.assertTrue(
+                    all(
+                        cell.value is None
+                        for row in range(7, 41)
+                        for cell in work_sheet[row]
+                    )
+                )
+                input_sheet = workbook[app.SHEET_NAME]
+                self.assertEqual(35, input_sheet.max_column)
+                transfer_columns = (
+                    3,
+                    5,
+                    7,
+                    11,
+                    14,
+                    15,
+                    17,
+                    18,
+                    19,
+                    20,
+                    21,
+                    22,
+                    23,
+                    24,
+                    25,
+                    26,
+                    27,
+                    28,
+                    29,
+                    30,
+                    31,
+                    32,
+                    33,
+                    34,
+                    35,
+                )
+                self.assertTrue(
+                    all(
+                        input_sheet.cell(row, column).value is None
+                        for row in range(6, input_sheet.max_row + 1)
+                        for column in transfer_columns
+                    )
+                )
+            finally:
+                workbook.close()
+
     def test_verified_good_dxf_matches_workbook_cell_values(self):
         if not self.good_dxf.exists() or not self.verified_workbook.exists():
             self.skipTest("ローカルの検証用DXFまたは確認済みExcelがありません。")
@@ -397,6 +571,38 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
         records = app.extract_output_records(texts, lines)
         self.assertEqual(25, len(records))
 
+        actual_work_stats = {}
+        for kind in app.WORK_OUTPUT_KINDS:
+            values = [
+                data["数量"]
+                for record in records
+                for data in record["データ"]
+                if data["種別"] == kind
+            ]
+            numeric = [
+                value for value in values
+                if isinstance(value, Decimal)
+            ]
+            actual_work_stats[kind] = (
+                len(numeric),
+                sum(numeric, Decimal("0")),
+                values.count(None),
+            )
+        self.assertEqual(LEGACY_WORK_EXPECTED_STATS, actual_work_stats)
+
+        sample = next(
+            record for record in records
+            if record["測点"] == Decimal("305")
+            and record["追加距離"] is None
+        )
+        sample_values = {
+            data["種別"]: data["数量"]
+            for data in sample["データ"]
+        }
+        self.assertEqual(Decimal("6.9"), sample_values["床掘"])
+        self.assertIsNone(sample_values["埋戻(C)"])
+        self.assertEqual(Decimal("3.2"), sample_values["埋戻(D)"])
+
         with tempfile.TemporaryDirectory() as temporary_directory:
             generated_path = Path(temporary_directory) / "generated.xlsx"
             app.write_output_workbook(
@@ -409,11 +615,6 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
             try:
                 expected_sheet = expected[app.SHEET_NAME]
                 actual_sheet = actual[app.SHEET_NAME]
-                max_row = max(expected_sheet.max_row, actual_sheet.max_row)
-                max_column = max(
-                    expected_sheet.max_column,
-                    actual_sheet.max_column,
-                )
                 mismatches = [
                     (
                         row,
@@ -421,16 +622,112 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
                         expected_sheet.cell(row, column).value,
                         actual_sheet.cell(row, column).value,
                     )
-                    for row in range(1, max_row + 1)
-                    for column in range(1, max_column + 1)
+                    for row in range(1, expected_sheet.max_row + 1)
+                    for column in range(1, 29)
                     if expected_sheet.cell(row, column).value
                     != actual_sheet.cell(row, column).value
+                ]
+
+                self.assertEqual(
+                    list(app.WORK_OUTPUT_KINDS),
+                    [actual_sheet[f"{column}2"].value for column in ("AC", "AD", "AE")],
+                )
+                self.assertEqual(
+                    ["断面積"] * 3,
+                    [actual_sheet[f"{column}3"].value for column in ("AC", "AD", "AE")],
+                )
+                self.assertEqual(
+                    ["(㎡)"] * 3,
+                    [actual_sheet[f"{column}4"].value for column in ("AC", "AD", "AE")],
+                )
+                for row in range(
+                    app.ROW_START,
+                    app.ROW_START + len(records),
+                ):
+                    self.assertEqual(
+                        f'=IF(ISBLANK(C{row}),"",G{row})',
+                        actual_sheet[f"AF{row}"].value,
+                    )
+                    self.assertEqual(
+                        f'=IF(ISBLANK(C{row}),"",SUM(K{row}:X{row}))',
+                        actual_sheet[f"AG{row}"].value,
+                    )
+                    self.assertEqual(
+                        f'=IF(ISBLANK(C{row}),"",SUM(Y{row}:Z{row}))',
+                        actual_sheet[f"AH{row}"].value,
+                    )
+                    self.assertEqual(
+                        f'=IF(ISBLANK(C{row}),"",SUM(AA{row}:AB{row}))',
+                        actual_sheet[f"AI{row}"].value,
+                    )
+                self.assertTrue(
+                    all(
+                        actual_sheet[f"{column}{row}"].value is None
+                        for row in range(
+                            app.ROW_START + len(records),
+                            actual_sheet.max_row + 1,
+                        )
+                        for column in app.INPUT_SUMMARY_COLUMNS.values()
+                    )
+                )
+
+                for input_row, record in enumerate(records, start=app.ROW_START):
+                    quantities = {
+                        data["種別"]: data["数量"]
+                        for data in record["データ"]
+                    }
+                    for kind, column in app.INPUT_WORK_COLUMNS.items():
+                        expected_value = quantities[kind]
+                        actual_value = actual_sheet[f"{column}{input_row}"].value
+                        if isinstance(expected_value, Decimal):
+                            actual_value = Decimal(str(actual_value))
+                        self.assertEqual(expected_value, actual_value)
+
+                work_sheet = actual["作業土工1"]
+                for index in range(len(records)):
+                    input_row = app.ROW_START + index
+                    work_row = app.ROW_START + 1 + index
+                    for output_column, input_column in (
+                        ("G", "AC"),
+                        ("J", "AE"),
+                        ("M", "AD"),
+                    ):
+                        self.assertEqual(
+                            f'=IF(入力!{input_column}{input_row}="","",'
+                            f"入力!{input_column}{input_row})",
+                            work_sheet[f"{output_column}{work_row}"].value,
+                        )
+
+                check_sheet = actual["チェック"]
+                self.assertEqual("作業土工", check_sheet["B25"].value)
+                self.assertEqual(
+                    '=IF(ISBLANK(INDEX(入力!$AC$5:$AC$29,$C$2)),"",'
+                    "INDEX(入力!$AC$5:$AC$29,$C$2))",
+                    check_sheet["D25"].value,
+                )
+                self.assertEqual(
+                    '=IF(ISBLANK(INDEX(入力!$AE$5:$AE$29,$C$2)),"",'
+                    "INDEX(入力!$AE$5:$AE$29,$C$2))",
+                    check_sheet["D27"].value,
+                )
+
+                ref_formulas = [
+                    (sheet.title, cell.coordinate, cell.value)
+                    for sheet in actual.worksheets
+                    for row in sheet.iter_rows()
+                    for cell in row
+                    if (
+                        isinstance(cell.value, str)
+                        and cell.value.startswith("=")
+                        and "#REF!" in cell.value
+                    )
                 ]
             finally:
                 expected.close()
                 actual.close()
 
         self.assertEqual([], mismatches)
+        self.assertEqual([], ref_formulas)
 
     def test_mainline_dxf_produces_77_complete_records(self):
         if not self.problem_dxf.exists():
@@ -508,7 +805,7 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
         self.assertEqual(BAD_EXPECTED_STATS, actual_stats)
 
         actual_work_stats = {}
-        for kind in app.HIERARCHICAL_WORK_OUTPUT_KINDS:
+        for kind in app.WORK_OUTPUT_KINDS:
             values = [
                 data["数量"]
                 for record in records
@@ -590,7 +887,26 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
             try:
                 input_sheet = workbook[app.SHEET_NAME]
                 self.assertEqual(100, input_sheet["E4"].value)
-                self.assertEqual("=SUM(AA81:AB81)", input_sheet["AH81"].value)
+                self.assertEqual(
+                    '=IF(ISBLANK(C81),"",SUM(AA81:AB81))',
+                    input_sheet["AI81"].value,
+                )
+
+                self.assertEqual(
+                    list(app.WORK_OUTPUT_KINDS),
+                    [input_sheet[f"{column}2"].value for column in ("AC", "AD", "AE")],
+                )
+                for input_row, record in enumerate(records, start=app.ROW_START):
+                    quantities = {
+                        data["種別"]: data["数量"]
+                        for data in record["データ"]
+                    }
+                    for kind, column in app.INPUT_WORK_COLUMNS.items():
+                        expected = quantities[kind]
+                        actual = input_sheet[f"{column}{input_row}"].value
+                        if isinstance(expected, Decimal):
+                            actual = Decimal(str(actual))
+                        self.assertEqual(expected, actual)
 
                 positions = [
                     (
@@ -631,21 +947,19 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
                 self.assertEqual("=R83", roadbed_sheet["R84"].value)
 
                 work_sheet = workbook["作業土工1"]
-                for index, record in enumerate(records, start=6):
-                    quantities = {
-                        data["種別"]: data["数量"]
-                        for data in record["データ"]
-                    }
-                    for column, kind in (
-                        (7, "床掘"),
-                        (10, "埋戻(D)"),
-                        (13, "埋戻(C)"),
+                for index in range(len(records)):
+                    input_row = app.ROW_START + index
+                    work_row = app.ROW_START + 1 + index
+                    for output_column, input_column in (
+                        ("G", "AC"),
+                        ("J", "AE"),
+                        ("M", "AD"),
                     ):
-                        expected = quantities[kind]
-                        actual = work_sheet.cell(index, column).value
-                        if isinstance(expected, Decimal):
-                            actual = Decimal(str(actual))
-                        self.assertEqual(expected, actual)
+                        self.assertEqual(
+                            f'=IF(入力!{input_column}{input_row}="","",'
+                            f"入力!{input_column}{input_row})",
+                            work_sheet[f"{output_column}{work_row}"].value,
+                        )
 
                 self.assertEqual(
                     "=路床!R84",
@@ -671,8 +985,19 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
 
                 check_sheet = workbook["チェック"]
                 self.assertEqual(
-                    "=INDEX(入力!$AB$5:$AB$81,$C$2)",
+                    '=IF(ISBLANK(INDEX(入力!$AB$5:$AB$81,$C$2)),"",'
+                    "INDEX(入力!$AB$5:$AB$81,$C$2))",
                     check_sheet["D24"].value,
+                )
+                self.assertEqual(
+                    '=IF(ISBLANK(INDEX(入力!$AC$5:$AC$81,$C$2)),"",'
+                    "INDEX(入力!$AC$5:$AC$81,$C$2))",
+                    check_sheet["D25"].value,
+                )
+                self.assertEqual(
+                    '=IF(ISBLANK(INDEX(入力!$AE$5:$AE$81,$C$2)),"",'
+                    "INDEX(入力!$AE$5:$AE$81,$C$2))",
+                    check_sheet["D27"].value,
                 )
                 self.assertEqual(
                     "掘削!$C$6:$C$82",
@@ -866,6 +1191,12 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
                             fill_left,
                         )
                         self.assertIsNone(input_sheet.cell(index, 28).value)
+                        self.assertTrue(
+                            all(
+                                input_sheet[f"{column}{index}"].value is None
+                                for column in ("AC", "AD", "AE")
+                            )
+                        )
 
                     ref_formulas = [
                         cell.value
@@ -882,13 +1213,19 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
 
                     if alignment == "本線":
                         work_sheet = workbook["作業土工1"]
-                        self.assertTrue(
-                            all(
-                                work_sheet.cell(row, column).value is None
-                                for row in range(6, 6 + len(records))
-                                for column in (7, 10, 13)
-                            )
-                        )
+                        for index in range(len(records)):
+                            input_row = app.ROW_START + index
+                            work_row = app.ROW_START + 1 + index
+                            for output_column, input_column in (
+                                ("G", "AC"),
+                                ("J", "AE"),
+                                ("M", "AD"),
+                            ):
+                                self.assertEqual(
+                                    f'=IF(入力!{input_column}{input_row}="","",'
+                                    f"入力!{input_column}{input_row})",
+                                    work_sheet[f"{output_column}{work_row}"].value,
+                                )
                 finally:
                     workbook.close()
 

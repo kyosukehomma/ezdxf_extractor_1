@@ -70,7 +70,7 @@ ATTACHED_GRID_MAX_GAP_FACTOR = 4.0
 ATTACHED_GRID_LEFT_TOLERANCE_FACTOR = 1.0
 TABLE_REGION_TOLERANCE_FACTOR = 0.05
 
-LEGACY_OUTPUT_KINDS = (
+LEGACY_SOURCE_KINDS = (
     "オープン掘削",
     "路体盛土(W＜2.5m)",
     "路体盛土(2.5m≦W＜4.0m)",
@@ -159,14 +159,16 @@ HIERARCHICAL_OUTPUT_KINDS = (
     "盛土法面整形(左)",
     "盛土法面整形(右)",
 )
-HIERARCHICAL_WORK_OUTPUT_KINDS = (
+WORK_OUTPUT_KINDS = (
     "床掘",
     "埋戻(C)",
     "埋戻(D)",
 )
+# 後方互換用。帳票へ転記する作業土工は全形式共通で扱う。
+HIERARCHICAL_WORK_OUTPUT_KINDS = WORK_OUTPUT_KINDS
 HIERARCHICAL_ALL_OUTPUT_KINDS = (
     HIERARCHICAL_OUTPUT_KINDS
-    + HIERARCHICAL_WORK_OUTPUT_KINDS
+    + WORK_OUTPUT_KINDS
 )
 CATEGORY_TABLE_SOURCE_SCHEMA = (
     ("オープン掘削", ((None, "オープン掘削"),)),
@@ -218,7 +220,17 @@ MIN_NEAREST_DISTANCE_GAP = 1.0
 
 SHEET_NAME = "入力"
 ROW_START = 5
-VERIFIED_LEGACY_RECORD_COUNT = 25
+INPUT_WORK_COLUMNS = {
+    "床掘": "AC",
+    "埋戻(C)": "AD",
+    "埋戻(D)": "AE",
+}
+INPUT_SUMMARY_COLUMNS = {
+    "CA": "AF",
+    "BA": "AG",
+    "CL": "AH",
+    "BL": "AI",
+}
 STATION_INTERVAL_CANDIDATES = (Decimal("20"), Decimal("100"))
 TEMPLATE_BASE = "01-01-03土工"
 TEMPLATE_NAME = TEMPLATE_BASE + ".xlsx"
@@ -949,14 +961,14 @@ def _build_legacy_table_group(table_texts):
         )
     group = groups[0]
     actual_kinds = tuple(record["種別"] for record in group)
-    if actual_kinds != LEGACY_OUTPUT_KINDS:
+    if actual_kinds != LEGACY_SOURCE_KINDS:
         missing = [
-            kind for kind in LEGACY_OUTPUT_KINDS
+            kind for kind in LEGACY_SOURCE_KINDS
             if kind not in actual_kinds
         ]
         extra = [
             kind for kind in actual_kinds
-            if kind not in LEGACY_OUTPUT_KINDS
+            if kind not in LEGACY_SOURCE_KINDS
         ]
         raise ExtractionError(
             f"既存型土工表の転記項目が一致しません"
@@ -976,7 +988,22 @@ def _build_legacy_table_group(table_texts):
             f"（{invalid_quantities}）。"
         )
 
-    return group
+    normalized = []
+    for record in group:
+        if record["種別"] != "埋戻":
+            normalized.append(record)
+            continue
+
+        backfill_c = dict(record)
+        backfill_c["種別"] = "埋戻(C)"
+        backfill_c["数量"] = None
+        normalized.append(backfill_c)
+
+        backfill_d = dict(record)
+        backfill_d["種別"] = "埋戻(D)"
+        normalized.append(backfill_d)
+
+    return normalized
 
 
 def _unique_axis_values(values, tolerance):
@@ -1596,12 +1623,12 @@ def resolve_table_stations(tables, stations, center_markers):
     ]
 
 
-def _select_mainline_tables(
+def _detect_table_route_names(
     tables,
     table_regions,
     all_texts,
 ):
-    """明示された路線名がある場合は、本線の土工表だけを残す。"""
+    """各土工表の路線名を取得し、無表示なら全表を本線とみなす。"""
     route_names = []
     for table, region in zip(tables, table_regions):
         main_bounds = region["main_bounds"]
@@ -1628,18 +1655,32 @@ def _select_mainline_tables(
         for route_name in route_names
     )
     if explicit_route_count == 0:
-        return tables, table_regions, ["本線"] * len(tables)
+        return ["本線"] * len(tables)
     if explicit_route_count != len(tables):
         raise ExtractionError(
             "路線名のある土工表とない土工表が混在しています。"
         )
+    if "本線" not in route_names:
+        raise ExtractionError("本線の土工表を検出できませんでした。")
 
+    return route_names
+
+
+def _select_mainline_tables(
+    tables,
+    table_regions,
+    all_texts,
+):
+    """明示された路線名がある場合は、本線の土工表だけを残す。"""
+    route_names = _detect_table_route_names(
+        tables,
+        table_regions,
+        all_texts,
+    )
     mainline_indexes = [
         index for index, route_name in enumerate(route_names)
         if route_name == "本線"
     ]
-    if not mainline_indexes:
-        raise ExtractionError("本線の土工表を検出できませんでした。")
 
     return (
         [tables[index] for index in mainline_indexes],
@@ -1821,11 +1862,15 @@ def extract_output_record_sets(all_texts, all_lines):
         all_lines,
         all_texts,
     )
-    tables, table_regions, alignments = _select_mainline_tables(
+    route_names = _detect_table_route_names(
         tables,
         table_regions,
         all_texts,
     )
+    mainline_indexes = [
+        index for index, route_name in enumerate(route_names)
+        if route_name == "本線"
+    ]
     data_groups = build_table_data_groups(
         all_texts,
         tables,
@@ -1841,13 +1886,13 @@ def extract_output_record_sets(all_texts, all_lines):
         table_stations = _resolve_category_table_stations(
             tables,
             stations,
-            alignments,
+            route_names,
         )
         return {
             "本線": _records_for_tables(
-                table_stations,
-                data_groups,
-                alignments,
+                [table_stations[index] for index in mainline_indexes],
+                [data_groups[index] for index in mainline_indexes],
+                ["本線"] * len(mainline_indexes),
             )
         }
 
@@ -1865,8 +1910,8 @@ def extract_output_record_sets(all_texts, all_lines):
     )
     return {
         None: _records_for_tables(
-            table_stations,
-            table_data_groups,
+            [table_stations[index] for index in mainline_indexes],
+            [table_data_groups[index] for index in mainline_indexes],
         )
     }
 
@@ -2083,6 +2128,10 @@ def _configure_detail_sheet(ws, station_count, *, slope=False):
         )
         ws.cell(row, 1).value = row - ROW_START
 
+    for row in range(max(7, data_last_row + 1), template_data_last + 1):
+        for cell in ws[row]:
+            cell.value = None
+
     for snapshot, target_row in zip(
         total_templates,
         target_total_rows,
@@ -2115,6 +2164,96 @@ def _configure_detail_sheet(ws, station_count, *, slope=False):
     }
 
 
+def _set_input_summary_formulas(ws, first_row, last_row):
+    for row in range(first_row, last_row + 1):
+        ws[f"AF{row}"] = f'=IF(ISBLANK(C{row}),"",G{row})'
+        ws[f"AG{row}"] = (
+            f'=IF(ISBLANK(C{row}),"",SUM(K{row}:X{row}))'
+        )
+        ws[f"AH{row}"] = (
+            f'=IF(ISBLANK(C{row}),"",SUM(Y{row}:Z{row}))'
+        )
+        ws[f"AI{row}"] = (
+            f'=IF(ISBLANK(C{row}),"",SUM(AA{row}:AB{row}))'
+        )
+
+
+def _prepare_input_sheet_layout(ws):
+    """作業土工3列と後続の集計列を所定位置へ揃える。"""
+    work_headers = tuple(
+        ws[f"{column}2"].value
+        for column in INPUT_WORK_COLUMNS.values()
+    )
+    layout_is_current = (
+        ws.max_column >= 35
+        and work_headers == tuple(WORK_OUTPUT_KINDS)
+        and tuple(
+            ws[f"{column}4"].value
+            for column in INPUT_SUMMARY_COLUMNS.values()
+        ) == tuple(INPUT_SUMMARY_COLUMNS)
+    )
+
+    if not layout_is_current:
+        old_work_headers = tuple(
+            ws[f"{column}2"].value
+            for column in ("AC", "AD")
+        )
+        old_summary_headers = tuple(
+            ws[f"{column}4"].value
+            for column in ("AE", "AF", "AG", "AH")
+        )
+        if not (
+            normalize_text(ws["AB2"].value or "")
+            == normalize_text("盛土法面整形(右)")
+            and old_work_headers == (None, None)
+            and old_summary_headers == tuple(INPUT_SUMMARY_COLUMNS)
+        ):
+            raise ExtractionError(
+                "入力シートの作業土工・集計列の配置が想定と一致しません。"
+            )
+
+        summary_dimensions = {
+            target: (
+                ws.column_dimensions[source].width,
+                ws.column_dimensions[source].hidden,
+            )
+            for source, target in zip(
+                ("AE", "AF", "AG", "AH"),
+                INPUT_SUMMARY_COLUMNS.values(),
+            )
+        }
+        ws.insert_cols(31, 1)
+
+        source_width = ws.column_dimensions["AB"].width
+        for column, kind in zip(
+            INPUT_WORK_COLUMNS.values(),
+            WORK_OUTPUT_KINDS,
+        ):
+            for row in range(1, ws.max_row + 1):
+                ws[f"{column}{row}"]._style = copy(ws[f"AB{row}"]._style)
+            ws.column_dimensions[column].width = source_width
+            ws.column_dimensions[column].hidden = False
+            ws[f"{column}2"] = kind
+            ws[f"{column}3"] = "断面積"
+            ws[f"{column}4"] = "(㎡)"
+            for row in range(ROW_START, ws.max_row + 1):
+                ws[f"{column}{row}"] = None
+
+        for column, kind in zip(
+            INPUT_SUMMARY_COLUMNS.values(),
+            INPUT_SUMMARY_COLUMNS,
+        ):
+            width, hidden = summary_dimensions[column]
+            ws.column_dimensions[column].width = width
+            ws.column_dimensions[column].hidden = hidden
+            ws[f"{column}4"] = kind
+
+    for column in INPUT_WORK_COLUMNS.values():
+        ws.column_dimensions[column].hidden = False
+
+    _set_input_summary_formulas(ws, ROW_START, ws.max_row)
+
+
 def _set_input_formulas(ws, out_data):
     station_count = len(out_data)
     input_last_row = ROW_START + station_count - 1
@@ -2133,12 +2272,35 @@ def _set_input_formulas(ws, out_data):
                 f"(C{row}-C{row - 1})*$E$4"
                 f"+(E{row}-E{row - 1}))"
             )
-        ws[f"AE{row}"] = f"=G{row}"
-        ws[f"AF{row}"] = f"=SUM(K{row}:X{row})"
-        ws[f"AG{row}"] = f"=SUM(Y{row}:Z{row})"
-        ws[f"AH{row}"] = f"=SUM(AA{row}:AB{row})"
-
+    _set_input_summary_formulas(ws, ROW_START, input_last_row)
     return input_last_row
+
+
+def _clear_input_transfer_values(ws):
+    transfer_kinds = {
+        normalize_text(kind)
+        for kind in (
+            LEGACY_SOURCE_KINDS
+            + HIERARCHICAL_OUTPUT_KINDS
+            + WORK_OUTPUT_KINDS
+        )
+    }
+    transfer_columns = [
+        column
+        for column in range(1, ws.max_column + 1)
+        if (
+            ws.cell(row=2, column=column).value is not None
+            and normalize_text(str(ws.cell(row=2, column=column).value))
+            in transfer_kinds
+        )
+    ]
+    for row in range(ROW_START, ws.max_row + 1):
+        ws.cell(row=row, column=3).value = None
+        ws.cell(row=row, column=5).value = None
+        for column in transfer_columns:
+            ws.cell(row=row, column=column).value = None
+        for column in INPUT_SUMMARY_COLUMNS.values():
+            ws[f"{column}{row}"] = None
 
 
 def _quantity_by_kind(record):
@@ -2154,44 +2316,25 @@ def _populate_work_earthwork_sheet(ws, out_data, layout):
     for index, record in enumerate(out_data):
         row = ROW_START + 1 + index
         quantities = _quantity_by_kind(record)
-        if set(HIERARCHICAL_WORK_OUTPUT_KINDS) <= quantities.keys():
-            work_quantities = {
-                kind: quantities[kind]
-                for kind in HIERARCHICAL_WORK_OUTPUT_KINDS
-            }
-        elif {"床掘", "埋戻"} <= quantities.keys():
-            work_quantities = {
-                "床掘": quantities["床掘"],
-                "埋戻(C)": "-",
-                "埋戻(D)": quantities["埋戻"],
-            }
-        elif not (
-            {
-                "床掘",
-                "埋戻",
-                "埋戻(C)",
-                "埋戻(D)",
-            }
-            & quantities.keys()
-        ):
-            work_quantities = {
-                "床掘": None,
-                "埋戻(C)": None,
-                "埋戻(D)": None,
-            }
-        else:
+        present_work_kinds = set(WORK_OUTPUT_KINDS) & quantities.keys()
+        if present_work_kinds and present_work_kinds != set(WORK_OUTPUT_KINDS):
             raise ExtractionError(
                 "作業土工の床掘・埋戻数量を特定できませんでした。"
             )
 
-        for column, kind in (
-            (7, "床掘"),
-            (10, "埋戻(D)"),
-            (13, "埋戻(C)"),
+        input_row = ROW_START + index
+        for output_column, input_column in (
+            ("G", INPUT_WORK_COLUMNS["床掘"]),
+            ("J", INPUT_WORK_COLUMNS["埋戻(D)"]),
+            ("M", INPUT_WORK_COLUMNS["埋戻(C)"]),
         ):
-            cell = ws.cell(row=row, column=column)
-            cell.value = work_quantities[kind]
-            cell.alignment = Alignment(horizontal="right")
+            ws[f"{output_column}{row}"] = (
+                f'=IF(入力!{input_column}{input_row}="","",'
+                f"入力!{input_column}{input_row})"
+            )
+            ws[f"{output_column}{row}"].alignment = Alignment(
+                horizontal="right"
+            )
 
         for column in (16, 17, 18):
             ws.cell(row=row, column=column).value = None
@@ -2268,7 +2411,7 @@ def _repair_check_sheet(ws, input_last_row, station_count):
         "B13": "盛土②",
         "B17": "盛土③",
         "B21": "法面",
-        "B25": None,
+        "B25": "作業土工",
         "B29": None,
     }.items():
         ws[cell] = value
@@ -2290,14 +2433,20 @@ def _repair_check_sheet(ws, input_last_row, station_count):
         22: "Z",
         23: "AA",
         24: "AB",
+        25: INPUT_WORK_COLUMNS["床掘"],
+        26: INPUT_WORK_COLUMNS["埋戻(C)"],
+        27: INPUT_WORK_COLUMNS["埋戻(D)"],
     }
     for row, column in row_to_input_column.items():
         ws[f"C{row}"] = (
             f'=IF(入力!{column}$2="","",入力!{column}$2)'
         )
-        ws[f"D{row}"] = (
-            f"=INDEX(入力!${column}$5:"
+        source = (
+            f"INDEX(入力!${column}$5:"
             f"${column}${input_last_row},$C$2)"
+        )
+        ws[f"D{row}"] = (
+            f'=IF(ISBLANK({source}),"",{source})'
         )
 
     ws.data_validations.dataValidation = []
@@ -2377,6 +2526,8 @@ def _update_downstream_formulas(wb, layouts):
 def _prepare_dynamic_workbook(wb, out_data):
     station_count = len(out_data)
     input_sheet = wb[SHEET_NAME]
+    _prepare_input_sheet_layout(input_sheet)
+    _clear_input_transfer_values(input_sheet)
     input_last_row = _set_input_formulas(input_sheet, out_data)
 
     layouts = {}
@@ -2425,26 +2576,7 @@ def _prepare_dynamic_workbook(wb, out_data):
 def write_output_workbook(template_path, output_path, out_data):
     wb = load_workbook(template_path)
     try:
-        is_hierarchical = bool(out_data) and all(
-            set(HIERARCHICAL_WORK_OUTPUT_KINDS)
-            <= {
-                data["種別"]
-                for data in record["データ"]
-            }
-            for record in out_data
-        )
-        is_category_quantity = bool(out_data) and all(
-            record.get("路線")
-            and [data["種別"] for data in record["データ"]]
-            == list(HIERARCHICAL_OUTPUT_KINDS)
-            for record in out_data
-        )
-        if (
-            len(out_data) > VERIFIED_LEGACY_RECORD_COUNT
-            or is_hierarchical
-            or is_category_quantity
-        ):
-            _prepare_dynamic_workbook(wb, out_data)
+        _prepare_dynamic_workbook(wb, out_data)
 
         ws = wb[SHEET_NAME]
 
