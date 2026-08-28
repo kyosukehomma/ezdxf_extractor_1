@@ -1,0 +1,41 @@
+flowchart TD
+    start([プログラム実行]) --> confirm{"処理を開始する？"}
+    confirm -->|"いいえ"| finish([終了])
+    confirm -->|"はい"| prepare["時刻付きのusedフォルダとexecフォルダを作成"]
+
+    prepare --> hasDxf{"inputに未処理DXFがある？"}
+    hasDxf -->|"ない"| result["処理済みと未処理をダイアログ表示"]
+    result --> finish
+    hasDxf -->|"ある"| readDxf["DXFをezdxfで読みTEXTとLINEを収集"]
+
+    readDxf --> detectTable["ヘッダーと罫線から土工表の範囲を検出"]
+    detectTable --> detectRoute["路線名を判定し無表記なら全表を本線扱い"]
+    detectRoute --> tableFormat{"土工表の形式は？"}
+
+    tableFormat -->|"従来型"| legacy["05横断図283～306：作業土工も読み未分割埋戻はDへ変換"]
+    tableFormat -->|"階層型"| hierarchical["05_本線横断図：区分を読み路床合算と左右法面と埋戻C・Dを取得"]
+    tableFormat -->|"種別型"| category["004_横断図240514：記号を使わず法面合算値を左へ変換"]
+
+    legacy --> hasCl{"CL文字がある？"}
+    hierarchical --> hasCl
+    hasCl -->|"ある"| viaCl["表から最寄りCLを経由して中心測点を特定"]
+    hasCl -->|"ない"| viaDistance["測点と表を位置関係で一対一対応し相互最寄りを確認"]
+    category --> categoryStation["路線ごとに表と測点を最小距離で一意対応"]
+
+    viaCl --> selectMainline
+    viaDistance --> selectMainline
+    categoryStation --> selectMainline
+    selectMainline["ランプを含む全表を解決後に本線だけを測点順に整列"] --> safe{"欠落や曖昧さや距離超過がない？"}
+
+    safe -->|"ある"| failed["未処理として記録しDXFをinputに残す"]
+    failed --> hasDxf
+    safe -->|"ない"| normalize["測点と項目と数量を共通Excelデータへ変換"]
+
+    normalize --> prepareWorkbook["テンプレートの入力列と明細行と印刷範囲を調整"]
+    prepareWorkbook --> transfer["入力シートへ転記し作業土工と集計とチェック式を更新"]
+    transfer --> save["時刻付きExcelをoutputのexecフォルダへ保存"]
+    save --> archive["処理済みDXFをinputのusedフォルダへ移動"]
+    archive --> hasDxf
+
+    style failed fill:#FFCDC2,stroke:#FF7556
+    style save fill:#CDF4D3,stroke:#66D575
