@@ -69,7 +69,97 @@ def text_token(text, x, y, layer, height=0.5):
     }
 
 
+def scale_geometry(texts, lines, factor):
+    scaled_texts = []
+    for text in texts:
+        scaled = dict(text)
+        for key in ("x", "y", "anchor_x", "anchor_y", "height"):
+            scaled[key] = text[key] * factor
+        scaled_texts.append(scaled)
+
+    scaled_lines = []
+    for line in lines:
+        scaled = dict(line)
+        for key in (
+            "x",
+            "y",
+            "start_x",
+            "start_y",
+            "end_x",
+            "end_y",
+        ):
+            scaled[key] = line[key] * factor
+        scaled_lines.append(scaled)
+
+    return scaled_texts, scaled_lines
+
+
+def record_set_semantics(record_sets):
+    return {
+        alignment: [
+            (
+                record["測点"],
+                record["追加距離"],
+                record.get("路線"),
+                tuple(
+                    (
+                        data["種別"],
+                        data["単位"],
+                        data["数量"],
+                    )
+                    for data in record["データ"]
+                ),
+            )
+            for record in records
+        ]
+        for alignment, records in record_sets.items()
+    }
+
+
 class TableDetectionTests(unittest.TestCase):
+    def test_normalizes_uniformly_scaled_geometry_without_mutating_input(self):
+        texts = [
+            text_token(word, index * 4.0, 100.0, "D-MTR-TXT", height=1.0)
+            for index, word in enumerate(app.EARTHWORK_HEADER_SEQUENCE)
+        ]
+        lines = [
+            {
+                "x": 10.0,
+                "y": 20.0,
+                "start_x": 0.0,
+                "start_y": 20.0,
+                "end_x": 20.0,
+                "end_y": 20.0,
+                "layer": "D-MTR-TXT",
+                "handle": None,
+            }
+        ]
+
+        normalized_texts, normalized_lines = (
+            app._normalize_drawing_geometry(texts, lines)
+        )
+
+        self.assertEqual(2.0, app._infer_earthwork_scale(texts))
+        self.assertEqual(1.0, texts[0]["height"])
+        self.assertEqual(0.5, normalized_texts[0]["height"])
+        self.assertEqual(50.0, normalized_texts[0]["y"])
+        self.assertEqual(10.0, normalized_lines[0]["y"])
+
+    def test_rejects_mixed_header_scales(self):
+        texts = [
+            text_token(
+                "種別" if index % 2 == 0 else "数量",
+                index * 3.0,
+                100.0,
+                "D-MTR-TXT",
+                height=0.5 if index < 5 else 1.0,
+            )
+            for index in range(6)
+        ]
+
+        with self.assertRaisesRegex(app.ExtractionError, "複数の尺度"):
+            app._infer_earthwork_scale(texts)
+
     def test_detects_two_block_header_signature(self):
         texts = [
             text_token(word, index * 3.0, 100.0, "D-MTR-TXT")
@@ -395,6 +485,43 @@ class VerifiedLocalRegressionTests(unittest.TestCase):
     )
     problem_dxf = LOCAL_CASE_DIR / "05_本線横断図.dxf"
     category_table_dxf = PROJECT_ROOT / "input" / "004_横断図240514.dxf"
+
+    def test_scaled_geometry_preserves_all_three_extraction_formats(self):
+        cases = (
+            self.good_dxf,
+            self.problem_dxf,
+            self.category_table_dxf,
+        )
+        missing = [path.name for path in cases if not path.exists()]
+        if missing:
+            self.skipTest(
+                "ローカルの倍率検証用DXFがありません"
+                f"（{missing}）。"
+            )
+
+        for path in cases:
+            doc = ezdxf.readfile(path)
+            modelspace = doc.modelspace()
+            texts = app.collect_all_texts(modelspace)
+            lines = app.collect_all_lines(modelspace)
+            expected = record_set_semantics(
+                app.extract_output_record_sets(texts, lines)
+            )
+
+            for factor in (0.1, 0.5, 2.0, 10.0):
+                with self.subTest(dxf=path.name, factor=factor):
+                    scaled_texts, scaled_lines = scale_geometry(
+                        texts,
+                        lines,
+                        factor,
+                    )
+                    actual = record_set_semantics(
+                        app.extract_output_record_sets(
+                            scaled_texts,
+                            scaled_lines,
+                        )
+                    )
+                    self.assertEqual(expected, actual)
 
     def _first_good_table_texts(self):
         if not self.good_dxf.exists():

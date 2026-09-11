@@ -8,7 +8,8 @@ flowchart TD
     result --> finish
     hasDxf -->|"ある"| readDxf["DXFをezdxfで読みTEXTとLINEを収集"]
 
-    readDxf --> detectTable["ヘッダーと罫線から土工表の範囲を検出"]
+    readDxf --> scaleGeometry["種別・数量ヘッダーの文字高から倍率を推定し座標を基準寸法へ正規化"]
+    scaleGeometry --> detectTable["ヘッダーと罫線から土工表の範囲を検出"]
     detectTable --> detectRoute["路線名を判定し無表記なら全表を本線扱い"]
     detectRoute --> tableFormat{"土工表の形式は？"}
 

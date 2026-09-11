@@ -8,7 +8,8 @@ from collections import Counter
 from copy import copy
 from decimal import Decimal, InvalidOperation
 from datetime import datetime
-from math import hypot
+from math import hypot, isfinite
+from statistics import median
 import tkinter as tk
 from tkinter import messagebox
 
@@ -37,6 +38,16 @@ TOLERANCE_Y_ROW   =  0.5
 TOLERANCE_X_GROUP =  0.5
 TOLERANCE_Y_GROUP = 10.0
 MERGE_Y_TOLERANCE =  1.0
+
+# 現行3形式の土工表ヘッダー文字高。各DXFの実際の文字高との比から、
+# モデル空間に適用された倍率を推定して座標距離の閾値を補正する。
+REFERENCE_EARTHWORK_HEADER_HEIGHT = 0.5
+EARTHWORK_HEADER_HEIGHT_RELATIVE_TOLERANCE = 0.05
+EARTHWORK_SCALE_HEADER_TEXTS = {"種別", "数量"}
+MIN_EARTHWORK_SCALE_HEADER_COUNT = 4
+MIN_EARTHWORK_SCALE_INLIER_RATIO = 1.0
+MIN_EARTHWORK_DRAWING_SCALE = 1e-6
+MAX_EARTHWORK_DRAWING_SCALE = 1e6
 
 EARTHWORK_TEXT_LAYER_PREFIX = "D-MTR-TXT"
 EARTHWORK_HEADER_SEQUENCE = ("種別", "単位", "数量", "種別", "単位", "数量")
@@ -257,6 +268,91 @@ def replace_angle_brackets(s: str) -> str:
 def sort_key(item):
     plus = item["追加距離"]
     return (item["測点"], Decimal("-1") if plus is None else plus)
+
+
+def _infer_earthwork_scale(all_texts):
+    header_texts = [
+        text for text in all_texts
+        if text.get("layer", "").startswith(EARTHWORK_TEXT_LAYER_PREFIX)
+        and text.get("text") in EARTHWORK_SCALE_HEADER_TEXTS
+    ]
+    if not header_texts:
+        return 1.0
+
+    if len(header_texts) < MIN_EARTHWORK_SCALE_HEADER_COUNT:
+        raise ExtractionError(
+            "モデル空間の倍率推定に必要な土工表ヘッダーが不足しています。"
+        )
+
+    heights = [text.get("height") for text in header_texts]
+    if any(
+        not isinstance(height, (int, float))
+        or not isfinite(height)
+        or height <= 0
+        for height in heights
+    ):
+        raise ExtractionError(
+            "土工表ヘッダーの文字高が不正なため、"
+            "モデル空間の倍率を推定できません。"
+        )
+
+    median_height = median(heights)
+    inlier_count = sum(
+        abs(height - median_height) / median_height
+        <= EARTHWORK_HEADER_HEIGHT_RELATIVE_TOLERANCE
+        for height in heights
+    )
+    if inlier_count / len(heights) < MIN_EARTHWORK_SCALE_INLIER_RATIO:
+        raise ExtractionError(
+            "土工表ヘッダーの文字高に複数の尺度が混在しているため、"
+            "モデル空間の倍率を一意に推定できません。"
+        )
+
+    scale = median_height / REFERENCE_EARTHWORK_HEADER_HEIGHT
+    if not MIN_EARTHWORK_DRAWING_SCALE <= scale <= MAX_EARTHWORK_DRAWING_SCALE:
+        raise ExtractionError(
+            "推定したモデル空間の倍率が安全範囲外です。"
+        )
+    return scale
+
+
+def _normalize_drawing_geometry(all_texts, all_lines):
+    """一様に拡大縮小されたTEXT・LINEを現行の基準寸法へ戻す。"""
+    scale = _infer_earthwork_scale(all_texts)
+    if abs(scale - 1.0) <= 1e-6:
+        return all_texts, all_lines
+
+    text_coordinate_keys = (
+        "x",
+        "y",
+        "anchor_x",
+        "anchor_y",
+        "height",
+    )
+    line_coordinate_keys = (
+        "x",
+        "y",
+        "start_x",
+        "start_y",
+        "end_x",
+        "end_y",
+    )
+
+    normalized_texts = []
+    for text in all_texts:
+        normalized = dict(text)
+        for key in text_coordinate_keys:
+            normalized[key] = text[key] / scale
+        normalized_texts.append(normalized)
+
+    normalized_lines = []
+    for line in all_lines:
+        normalized = dict(line)
+        for key in line_coordinate_keys:
+            normalized[key] = line[key] / scale
+        normalized_lines.append(normalized)
+
+    return normalized_texts, normalized_lines
 
 # ==================================================
 # DXF → TEXT 抽出
@@ -1856,6 +1952,10 @@ def _records_for_tables(
 
 def extract_output_record_sets(all_texts, all_lines):
     """DXFから、同じ測点系列でExcel化できるレコード群を抽出する。"""
+    all_texts, all_lines = _normalize_drawing_geometry(
+        all_texts,
+        all_lines,
+    )
     tables = detect_earthwork_tables(all_texts)
     table_regions = detect_table_regions(
         tables,
