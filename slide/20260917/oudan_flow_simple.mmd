@@ -1,0 +1,64 @@
+%% DXF横断図 赤黄チェッカー：簡易処理フロー
+%% 作成日: 2026-09-17
+%% 参照: oudan_red_yellow_checker.py（da59e13 時点の実装）
+%% 実線は処理の順序、点線は例外経路・補足。
+%% 説明用の簡易図。閾値・形式別の詳細は oudan_flow_detailed.mmd を参照。
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Noto Sans JP, Yu Gothic, Meiryo, sans-serif","fontSize":"16px","primaryColor":"#FFFFFF","primaryTextColor":"#26332F","primaryBorderColor":"#01A173","lineColor":"#73867E","secondaryColor":"#EAF7F2","tertiaryColor":"#F5F7F6","clusterBkg":"#FAFCFB","clusterBorder":"#CFDDD7"},"flowchart":{"curve":"linear","nodeSpacing":32,"rankSpacing":42,"htmlLabels":true}}}%%
+flowchart TB
+    START([開始]) --> CONFIRM{"処理開始を確認"}
+    CONFIRM -->|キャンセル| FINISH([終了])
+    CONFIRM -->|OK| PREP["日時付きフォルダを準備<br/>input/used_日時 ・ output/exec_日時"]
+    PREP --> LIST["input 直下の *.dxf を一度列挙<br/>used フォルダの中は対象外"]
+    LIST --> NEXT{"R：一覧に次のDXFがある？"}
+
+    subgraph ONE["DXFを1ファイルずつ処理"]
+        direction TB
+        READ["DXF内部の文字 TEXT と線 LINE を読む<br/>AutoCADの画面操作・画像認識はしない"]
+        SCALE["表見出しの文字高から倍率を推定<br/>読み取った座標を基準サイズにそろえる"]
+        TABLE["見出しの並びと罫線から<br/>土工表の範囲を特定"]
+        ROUTE["各表の路線名を判定<br/>全表で表示がなければ本線扱い"]
+        QUANTITY["表の構造に応じて数量を抽出・変換<br/>従来型 ／ 階層型 ／ 種別・区分・数量型"]
+        STATIONS["指定レイヤーと表記から<br/>No.番号・追加距離の候補を抽出"]
+        FORMAT{"表の形式は？"}
+        CL{"従来型・階層型：<br/>有効なCL文字がある？"}
+        WITH_CL["表 → CL → 測点の順に対応付け<br/>距離・候補の近さ・重複を検証"]
+        WITHOUT_CL["表と測点の相互最寄りで対応付け<br/>1対1・距離・候補の近さを検証"]
+        CATEGORY["種別型：路線内で総距離最小の割当<br/>本線番号100以上・ランプ100未満<br/>距離・番号の連続性を検証／CLは使わない"]
+        SELECT["全路線の表を検証した後<br/>本線だけを採用して測点順に整列"]
+        EXCEL["Excelテンプレートを測点数に合わせて調整<br/>入力・明細・集計・チェックの数式等を更新<br/>測点と数量を転記"]
+        SAVE["output/exec_日時 にExcelを保存<br/>Excelで開いた際に再計算する設定"]
+        MOVE["保存後に元DXFを input/used_日時 へ移動"]
+        OK["成功ファイルとして記録"]
+
+        READ --> SCALE --> TABLE --> ROUTE --> QUANTITY --> STATIONS --> FORMAT
+        FORMAT -->|従来型・階層型| CL
+        CL -->|ある| WITH_CL
+        CL -->|ない| WITHOUT_CL
+        FORMAT -->|種別型だけ| CATEGORY
+        WITH_CL --> SELECT
+        WITHOUT_CL --> SELECT
+        CATEGORY --> SELECT
+        SELECT --> EXCEL --> SAVE --> MOVE --> OK
+    end
+
+    NEXT -->|ある| READ
+    OK --> REPEAT(["Rへ戻る：次のDXFを処理"])
+    FORMAT -->|種別型と他形式が混在| FAIL
+    ONE -.->|各工程で検証不合格・読み書き等の例外| FAIL
+    FAIL["そのDXFの処理を打ち切り、理由を記録<br/>次のファイルへ進む"] --> REPEAT
+    FAIL -.-> FAILURE_NOTE["通常、失敗したDXFはinputに残る<br/>保存後の移動失敗でも失敗扱い<br/>保存済みExcelは自動削除されない"]
+    PREP -.->|準備中の例外| SETUP_ERROR["ファイルごとの処理に入る前に中断"]
+    NEXT -->|ない| REPORT{"失敗したファイルがある？"}
+    REPORT -->|ある| WARN["成功一覧と未処理の理由を警告表示"]
+    REPORT -->|ない| INFO["処理完了を表示"]
+    WARN --> FINISH
+    INFO --> FINISH
+    INFO -.-> HUMAN["利用者がExcelを開き、再計算後に目視確認<br/>図面の最終評価は人が行う"]
+    WARN -.-> HUMAN
+
+    classDef key fill:#EAF7F2,stroke:#01A173,stroke-width:2px,color:#26332F;
+    classDef note fill:#F5F7F6,stroke:#AFBBB5,stroke-dasharray:4 3,color:#53625A;
+    classDef error fill:#F2F3F3,stroke:#5C6761,color:#29312D;
+    class START,SELECT,SAVE,OK,FINISH key;
+    class FAILURE_NOTE,HUMAN note;
+    class FAIL,SETUP_ERROR,WARN error;
